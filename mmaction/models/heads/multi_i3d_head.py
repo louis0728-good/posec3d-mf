@@ -62,55 +62,56 @@ class DualI3DHead(DualBaseHead):
         normal_init(self.fc_cls_upper, std=self.init_std)
         normal_init(self.fc_cls_lower, std=self.init_std)
 
-    def forward(self, x: Tensor, **kwargs) -> Tensor:
-        if x.dim() != 5:
+    def forward(self, x, **kwargs):
+        """x: neck 回傳的 (F_up, F_low)，各為 [B, C, T, H, W]"""
+        if not isinstance(x, (tuple, list)) or len(x) != 2:
             raise ValueError(
-                f'[DualI3DHead] 輸入特徵維度錯誤: got shape={tuple(x.shape)}, 預期 [B, C, T, H, W]'
+                f'[DualI3DHead] 預期收到 (F_up, F_low) 兩個特徵，'
+                f'got {type(x)}'
             )
+        x_up, x_low = x
 
-        if x.shape[1] != self.in_channels:
-            raise ValueError(
-                f'[DualI3DHead] 輸入通道數錯誤: got {x.shape[1]}, expected {self.in_channels}'
-            )
+        feats = []
+        for name, feat in (('upper', x_up), ('lower', x_low)):
+            if feat.dim() != 5:
+                raise ValueError(
+                    f'[DualI3DHead] {name} 特徵維度錯誤: '
+                    f'got shape={tuple(feat.shape)}, 預期 [B, C, T, H, W]'
+                )
+            if feat.shape[1] != self.in_channels:
+                raise ValueError(
+                    f'[DualI3DHead] {name} 通道數錯誤: '
+                    f'got {feat.shape[1]}, expected {self.in_channels}'
+                )
+            if self.debug and not torch.isfinite(feat).all():
+                raise FloatingPointError(
+                    f'[DualI3DHead] {name} 輸入特徵出現 NaN 或 Inf')
 
-        if not torch.isfinite(x).all():
-            raise FloatingPointError('[DualI3DHead] 輸入特徵 x 出現 NaN 或 Inf')
-        
-        """Defines the computation performed at every call.
+            # [N, in_channels, T, H, W] -> [N, in_channels, 1, 1, 1]
+            if self.avg_pool is not None:
+                feat = self.avg_pool(feat)
+            # 兩條分支各自 dropout，遮罩不共用
+            if self.dropout is not None:
+                feat = self.dropout(feat)
+            feat = feat.reshape(feat.shape[0], -1)
+            assert feat.shape[1] == self.in_channels, \
+                f"[DualI3DHead] {name} 特徵維度不匹配: " \
+                f"expected {self.in_channels}, got {feat.shape[1]}"
+            feats.append(feat)
 
-        Args:
-            x (Tensor): The input data.
+        x_up, x_low = feats
 
-        Returns:
-            Tensor: The classification scores for input samples.
-        """
-        # [N, in_channels, 4, 7, 7]
-        if self.avg_pool is not None:
-            x = self.avg_pool(x)
-        # [N, in_channels, 1, 1, 1]
-        if self.dropout is not None:
-            x = self.dropout(x)
-        # [N, in_channels, 1, 1, 1]
-        x = x.reshape(x.shape[0], -1)
+        cls_score_upper = self.fc_cls_upper(x_up)
+        cls_score_lower = self.fc_cls_lower(x_low)
 
-        assert x.shape[1] == self.in_channels, \
-                f"[DualI3DHead] 特徵維度不匹配: expected {self.in_channels}, got {x.shape[1]}"
+        if self.debug:
+            assert cls_score_upper.shape[1] == self.num_classes_upper, \
+                f"[DualI3DHead] upper 輸出維度錯誤: {cls_score_upper.shape}"
+            assert cls_score_lower.shape[1] == self.num_classes_lower, \
+                f"[DualI3DHead] lower 輸出維度錯誤: {cls_score_lower.shape}"
+            if not torch.isfinite(cls_score_upper).all():
+                raise FloatingPointError('[DualI3DHead] cls_score_upper 出現 NaN 或 Inf')
+            if not torch.isfinite(cls_score_lower).all():
+                raise FloatingPointError('[DualI3DHead] cls_score_lower 出現 NaN 或 Inf')
 
-        # [N, in_channels]
-        # 特徵分別通過兩個全連接層
-        cls_score_upper = self.fc_cls_upper(x)
-        cls_score_lower = self.fc_cls_lower(x)
-
-        assert cls_score_upper.shape[1] == self.num_classes_upper, \
-            f"[DualI3DHead] upper 輸出維度錯誤: {cls_score_upper.shape}"
-        assert cls_score_lower.shape[1] == self.num_classes_lower, \
-            f"[DualI3DHead] lower 輸出維度錯誤: {cls_score_lower.shape}"
-        
-        if not torch.isfinite(cls_score_upper).all():
-            raise FloatingPointError('[DualI3DHead] cls_score_upper 出現 NaN 或 Inf')
-
-        if not torch.isfinite(cls_score_lower).all():
-            raise FloatingPointError('[DualI3DHead] cls_score_lower 出現 NaN 或 Inf')
-
-        # [N, num_classes]
-        return cls_score_upper, cls_score_lower # 同時回傳兩個預測結果
+        return cls_score_upper, cls_score_lower

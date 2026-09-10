@@ -7,7 +7,7 @@ MAMA_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULT_DIR = os.path.join(MAMA_DIR, 'outputs_videos')
 os.makedirs(RESULT_DIR, exist_ok=True)
 
-def sith(total_frames=random.randint(15, 200), window_size=21, stride=1, noise_rate=0.40):
+def sith(total_frames=random.randint(15, 200), window_size=21, stride=1, noise_rate=0.10):
     # 生成模仿 PoseC3D dual-head 滑動視窗推論格式的假資料
     segments = []
     person_ids = [1, 2] 
@@ -70,7 +70,7 @@ if __name__ == "__main__":
             total_frames=total_frames, 
             window_size=21, 
             stride=1, 
-            noise_rate=0.40
+            noise_rate=0.10
         )
         
         save_data = {

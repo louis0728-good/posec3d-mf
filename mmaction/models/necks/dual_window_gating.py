@@ -3,20 +3,97 @@ import torch.nn as nn
 from mmaction.registry import MODELS
 from mmengine.model import BaseModule
 
+class MotionInject(nn.Module):
+    """把 motion 特徵轉成 feat_dim 維，用來調變視窗特徵 F。
+
+    beta : F + b
+    gamma: F * (1 + g)
+    film : F * (1 + g) + b
+
+    末層 zero-init，初始輸出等同完全不注入。
+    """
+
+    def __init__(self, motion_dim, feat_dim, inject_type):
+        super().__init__()
+        assert inject_type in ('beta', 'gamma', 'film')
+        self.inject_type = inject_type
+        self.motion_norm = nn.BatchNorm1d(motion_dim)
+
+        self.to_beta = None
+        self.to_gamma = None
+        if inject_type in ('beta', 'film'):
+            self.to_beta = nn.Linear(motion_dim, feat_dim)
+            nn.init.zeros_(self.to_beta.weight)
+            nn.init.zeros_(self.to_beta.bias)
+        if inject_type in ('gamma', 'film'):
+            self.to_gamma = nn.Linear(motion_dim, feat_dim)
+            nn.init.zeros_(self.to_gamma.weight)
+            nn.init.zeros_(self.to_gamma.bias)
+
+    def forward(self, feat_list, motion_list):
+        """feat_list / motion_list 一一對應（長視窗、短視窗）。
+        沿 batch 維 concat 過同一份 BN，讓長短視窗共用統計量。"""
+        assert len(feat_list) == len(motion_list)
+        n = len(feat_list)
+        motion_all = self.motion_norm(torch.cat(motion_list, dim=0))
+
+        beta_list = (self.to_beta(motion_all).chunk(n, dim=0)
+                     if self.to_beta is not None else None)
+        gamma_list = (self.to_gamma(motion_all).chunk(n, dim=0)
+                      if self.to_gamma is not None else None)
+
+        out = []
+        for i, feat in enumerate(feat_list):
+            if gamma_list is not None:
+                feat = feat * (1.0 + gamma_list[i])
+            if beta_list is not None:
+                feat = feat + beta_list[i]
+            out.append(feat)
+        return out
+
+    
 @MODELS.register_module()
 class DualWindowGatingNeck(BaseModule):
-    def __init__(self, in_channels, sg_feat_dim, out_channels=512, 
-                 crop_ratio=0.7, debug=False):
+    def __init__(self, in_channels, motion_dim_whole=72, motion_dim_part=36,
+                 out_channels=512, l2_in_channels=256, crop_margin=3, mode='per_gate',
+                 motion_inject='none', inject_scope='whole_body', debug=False):
         super().__init__()
         self.in_channels = in_channels
-        self.sg_feat_dim = sg_feat_dim
+        self.motion_dim_whole = motion_dim_whole
         self.out_channels = out_channels
+        self.l2_in_channels = l2_in_channels
+        self.crop_margin = crop_margin
         self.debug = debug
         self._printed_once = False
+        self._step = 0
+        assert mode in (
+            'per_gate',
+            'dual_gate',
+            'dual_window',
+            'learnable',
+            'long_only',
+            'short_only',
+        ), f'[Neck] 不支援的 mode: {mode}'
 
-        # 決定小視窗要從 Feature Map 的 T 維度哪裡切到哪裡
-        # 假設大視窗是 21 幀 (t-10 ~ t+10)，小視窗是 15 幀 (t-7 ~ t+7)
-        self.crop_ratio = crop_ratio # crop_ratio=0.7 這樣不知道有沒有降採樣 (有)
+        self.mode = mode
+
+        assert motion_inject in ('none', 'beta', 'gamma', 'film'), \
+            f'[Neck] 不支援的 motion_inject: {motion_inject}'
+        assert inject_scope in ('whole_body', 'upper_lower'), \
+            f'[Neck] 不支援的 inject_scope: {inject_scope}'
+        
+        self.motion_dim_part = motion_dim_part
+        self.motion_inject = motion_inject
+        self.inject_scope = inject_scope
+
+        # 是否真的需要長、短視窗
+        self.use_lw = mode != 'short_only'
+        self.use_sw = mode != 'long_only'
+        self.use_gate = mode in ('per_gate', 'dual_gate')                # 自適應 gating
+        self.dual_gate = (mode == 'dual_gate')
+
+        # 是否使用不依賴 motion 的可學融合
+        self.use_learnable = mode == 'learnable'
 
         # 空間池化 (GAP)
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1)) # T 維保持一樣，後面的 h, w 變成 1
@@ -24,128 +101,268 @@ class DualWindowGatingNeck(BaseModule):
 
         # 時間池化 (Temporal Pooling)
         self.temporal_pool = nn.AdaptiveAvgPool3d((1, 1, 1)) # 跟上面差不多
-        """
-            data_sample = gt_label、sg_features ...
-            gt_label = (results['label'])
-        """
-        # Gating Machine (將 F_L, F_S, sg_features 融合)
-        # 總輸入維度 = Backbone通道(F_L) + Backbone通道(F_S) + S-G向量維度
-        # 大小視窗都 512 維的情況?
-        fused_dim = self.in_channels * 2 + self.sg_feat_dim  # 這裡應該就是 gin 的總維度了
-        # 所以理想狀況應該會是 512 * 2 + 136 =1160
-        """ 要去 sg 做確認，dim 維度 """
-        """
-        fused_dim 這行在算輸入維度：
-                F_L：一個 C 維向量
-                F_S：另一個 C 維向量
-                上面的都是剛剛 BACKBONE 的輸出
 
-                sg_features：一個 sg_feat_dim 維向量(S-G 輸出的骨架的速度加速度)
-        """
+        # layer2 是 256 通道，要投影到 512 才能跟 F_L 做逐通道 gating
+        if self.use_sw:
+            self.small_proj = nn.Sequential(
+                nn.Linear(l2_in_channels, in_channels),
+                nn.BatchNorm1d(in_channels),
+                nn.ReLU(inplace=True),
+            )
+
         """
             data_sample = gt_label、sg_features ...
             gt_label = (results['label'])
         """
-        # 算 alpha beta 權重
-        hidden_dim = out_channels // 2 # 降維
-        self.gating_machine = nn.Sequential( # MLP
-            nn.Linear(fused_dim, hidden_dim), # 第一層全連接層 (input, output)
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 2)
-        )
-        self.softmax = nn.Softmax(dim=1) # 確保兩權重相加為一
+        hidden_dim = out_channels // 2
+
+        def _make_scorer(motion_dim):
+            return nn.Sequential(
+                nn.BatchNorm1d(motion_dim),
+                nn.Linear(motion_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, in_channels),
+            )
+
+        if self.dual_gate:
+            # 上下半身各一份、不共享權重：
+            # 兩者的運動統計分布不同，且服務的是不同的分類頭
+            self.motion_scorer_upper = _make_scorer(self.motion_dim_part)
+            self.motion_scorer_lower = _make_scorer(self.motion_dim_part)
+        elif self.use_gate:
+            self.motion_scorer = _make_scorer(self.motion_dim_whole)
+
+        if self.use_learnable:
+            # 每個 channel 一個固定 α。
+            # sigmoid(0) = 0.5，因此初始狀態等同 dual_window。
+            self.alpha_logit = nn.Parameter(
+                torch.zeros(in_channels)
+            )
+
+        if motion_inject != 'none':
+            if inject_scope == 'upper_lower':
+                # 上下半身各一份，權重不共享
+                self.inject_upper = MotionInject(
+                    self.motion_dim_part, in_channels, motion_inject)
+                self.inject_lower = MotionInject(
+                    self.motion_dim_part, in_channels, motion_inject)
+            else:
+                self.inject_whole = MotionInject(
+                    self.motion_dim_whole, in_channels, motion_inject)
 
     def forward(self, x, data_samples=None, **kwargs): # 接收參數改為 data_samples
-        # x shape: [B, C, T, H, W]
-        #          [B, 512, 11, H, W]
-        B, C, T, H, W = x.shape
-        if self.debug and not self._printed_once:
-            print(f"\n[DualWindowGatingNeck DEBUG] 輸入 Feature Map shape: {x.shape}")
+        if isinstance(x, (tuple, list)):
+            assert len(x) == 2, f'[Neck] 預期 2 個 stage，收到 {len(x)}'
+            x2, x3 = x 
+            # x2 是 layer2，x3 是 layer3，所以時序來說，x2 的 T 會比 x3 長，因為 layer3 有做 temporal stride。
+            # 但實際上 x3 的感受野更大，是代表最一開始那個 21 幀。x2 只是為了要等等的短視窗 S-G 做裁切。
+        else:
+            assert not self.use_sw, '[Neck] per_gate/dual_window 需要 out_indices=(1,2)'
+            x2, x3 = None, x
 
-        assert C == self.in_channels, f"通道數不符: {C} vs {self.in_channels}"
-        assert data_samples is not None, "[Neck] 錯誤：data_samples 為 None，去確認 Recognizer(應該是 custom_recognizer.py) 有傳遞過來！"
-        # 呼應前面的 loss, predict
+        B = None
+        if self.use_lw:
+            assert x3 is not None, '[Neck] 此 mode 需要 layer3 特徵'
+            B, C, T, H, W = x3.shape
+            assert C == self.in_channels, f" layer 3 通道數不符: {C} vs {self.in_channels}"
 
-        sg_feats_list = []
-        # 原始 batch 裡有幾個樣本，就有幾個 data_sample
-        # 但 feature 的 B 不一定等於原始樣本數，因為 [N, num_clips, C, T, H, W] -> [N * num_clips, C, T, H, W]
-        for sample in data_samples:
-            assert hasattr(sample, 'sg_features'), \
-                "[Neck] 錯誤：找不到 'sg_features'！檢查 PackActionInputs 的 algorithm_keys=('sg_features',)"
+        if self.use_sw:
+            assert x2 is not None, '[Neck] 此 mode 需要 layer2 特徵'
+            B_short = x2.shape[0]
+            if B is None:
+                B = B_short
+            else:
+                assert B == B_short, \
+                    f'長短視窗 batch 不符: {B} vs {B_short}'
+
+            assert x2.shape[1] == self.l2_in_channels, \
+                f'layer2 通道數不符: {x2.shape[1]} vs {self.l2_in_channels}'
         
-            # 把 numpy 轉成 tensor，並確保跟 x 在同一張顯卡上
-            feat_tensor = torch.as_tensor(sample.sg_features, dtype=torch.float32, device=x.device) # 不知道會不會有問題，不行就改回 tensor()
-            # data_sample.sg_features 是在 formatting 存上的
-            # sg_features 應該會是 136 維
-            sg_feats_list.append(feat_tensor)
-            
-        sg_features = torch.stack(sg_feats_list) # shape: [B, sg_feat_dim] 
-        # 假設 N*num_clips = 16 那這裡的batch 應該就會是 16(clips=1 我設定的)。
-        # 那 sg_features 應該會長 [16, 136]
 
-        # 測試時 num_clips > 1，B = N * num_clips，需要 repeat
-        if sg_features.shape[0] != B: # 通常不會進入 因為我的 num_clips 設定為 1 
-            # 跟那個 CLIP/CROP 有關
-            num_crops = B // sg_features.shape[0]
-            # 這個 我先不加，因為不太會觸發 if not self._printed_once:
-            print(
-                f"[dual_window_gating][DEBUG] 偵測到 batch 不一致，準備展開 sg_features："
-                f"B={B}, sg_batch={sg_features.shape[0]}, num_crops={num_crops}。"
-                f"這通常發生在 num_clips>1，因為同一筆 data_sample 會對應多個 views。"
-                f"順帶一提， sg_feature shape 大概會長 : shape: [{B}, sg_feat]。"
-            )
-            sg_features = sg_features.unsqueeze(1).expand(
-                -1, num_crops, -1).reshape(B, -1)
-            if self.debug and not self._printed_once:
-                print(f"[DualWindowGatingNeck DEBUG] sg_features repeat {num_crops}x → {sg_features.shape}")
-        elif not self._printed_once: 
-            print(
-                f"[dual_window_gating][DEBUG] B == sg_features.shape[0]，跳過展開："
-                f"B={B}, sg_batch={sg_features.shape[0]}。"
-                f"通常表示 num_clips=1，每個 data_sample 只對應一筆 feature。"
-            )
-            
-        # --- 產生 F_L (大視窗特徵) ---
+        # 需要哪些 key，以及各自的期望維度
+        # 用字典是因為兩個需求方可能要到同一個 key（shared 注入和 gating 都要 motion_L）
+        need = {}
+        if self.use_gate:
+            if self.dual_gate:
+                for k in ('motion_upper_L', 'motion_upper_S',
+                          'motion_lower_L', 'motion_lower_S'):
+                    need[k] = self.motion_dim_part
+            else:
+                for k in ('motion_L', 'motion_S'):
+                    need[k] = self.motion_dim_whole
+
+        if self.motion_inject != 'none':
+            if self.inject_scope == 'upper_lower': # 代表 dual_gate 會用到
+                for k in ('motion_upper_L', 'motion_upper_S',
+                          'motion_lower_L', 'motion_lower_S'):
+                    need.setdefault(k, self.motion_dim_part)
+            else:
+                for k in ('motion_L', 'motion_S'): # 代表 其他都會用到
+                    need.setdefault(k, self.motion_dim_whole)
+
+        motion = {}
+        if need: # 都不需要就跳過（gating 和注入都不需要的情況)
+            assert data_samples is not None, \
+                '[Neck] gating / motion_inject 需要 data_samples'
+            dev = x3.device if x3 is not None else x2.device
+            for k, dim in need.items():
+                motion[k] = self._stack_motion(data_samples, k, B, dev, dim)
+                    
+        # F_L：深層 (layer3)，涵蓋整段 21 幀
         # 針對 H, W 做空間 GAP，再針對 T 做時間 GAP
-        F_L = self.temporal_pool(self.spatial_pool(x)).view(B, -1) # shape: [B, C]
-        # 這是用整個 feature map 的時間長度 T 做平均，得到整個大視窗的全局向量。
+        F_L = None
+        if self.use_lw:
+            F_L = self.temporal_pool(self.spatial_pool(x3)).view(B, -1).float()
 
-        # --- 產生 F_S (小視窗特徵) ---
-        crop_len = max(1, int(T * self.crop_ratio)) # backbone 降採樣後應該剩下 21/2 = 11, 假設 11* 0.7 = ７
-        start_idx = (T - crop_len) // 2 # 11-7=4, 4//2==2
-        end_idx = start_idx + crop_len # = 2+7==9
+        F_S = None
+        if self.use_sw:
+            m, T2 = self.crop_margin, x2.shape[2] # shape: [B, C, T2, H, W]
+            assert T2 > 2 * m, f"[Neck] layer2 的 T={T2} 太短"
+            x2_small = x2[:, :, m:T2 - m] # [, , 9:12 (21-9), , ]，剛好 15 幀
+            if self.debug and not self._printed_once:
+                print(f"[Neck DEBUG] 小視窗(幀 {m}~{T2-m-1}): {tuple(x2_small.shape)}")
+            F_S = self.small_proj(
+                self.temporal_pool(self.spatial_pool(x2_small)).view(B, -1)).float()
 
-        x_small = x[:, :, start_idx:end_idx, :, :] #　包含頭，不包含尾 [2,3,4,5,6,7,8]
+        if self.debug and not self._printed_once and F_S is not None and F_L is not None:
+            print(f"[Scale] |F_L| {F_L.norm(dim=1).mean().item():.3f}   "
+                  f"|F_S| {F_S.norm(dim=1).mean().item():.3f}   "
+                  f"ratio {(F_L.norm(dim=1).mean() / F_S.norm(dim=1).mean()).item():.2f}")
+
+        if self.debug and self.training:
+            self._step += 1
+
+        def _inject(injector, key_long, key_short):
+            """把 F_L 配 motion_L、F_S 配 motion_S 各自注入，不跨視窗混合"""
+            feats, motions, slots = [], [], []
+            # 收集當前模式下實際存在的視覺特徵張量（F_L 或 F_S）
+            # 收集與 feats 嚴格成對、一一對應的運動特徵
+            # 屬於長視窗（'L'）還是短視窗（'S'）
+            if F_L is not None: 
+                feats.append(F_L)
+                motions.append(motion[key_long])
+                slots.append('L')
+            if F_S is not None:
+                feats.append(F_S)
+                motions.append(motion[key_short])
+                slots.append('S')
+            done = dict(zip(slots, injector(feats, motions)))
+            return done.get('L'), done.get('S')
+
+        F_up = F_low = None
+        if self.motion_inject != 'none': # 長短自己的運動特徵參數，不是原本的控制比例用的
+            # inject 裡面自己就會把前面的 F_L、F_S 依照長短視窗各自注入
+            if self.inject_scope == 'whole_body':
+                F_L, F_S = _inject(self.inject_whole, 'motion_L', 'motion_S') 
+
+            else: # 走到這裡代表選了「上下半身各用自己的運動特徵注入」(mode = dual_gate)
+                F_L_up, F_S_up = _inject(
+                    self.inject_upper, 'motion_upper_L', 'motion_upper_S')
+                F_L_low, F_S_low = _inject(
+                    self.inject_lower, 'motion_lower_L', 'motion_lower_S')
+
+                # F_L_up, F_S_up 是上半身的長短視窗特徵
+                # F_L_low, F_S_low 是下半身的長短視窗特徵
+                if self.mode != 'dual_gate':
+                    raise ValueError(
+                        f"[Neck] inject_scope='upper_lower' 只支援 dual_gate，"
+                        f"收到 {self.mode}。其餘 mode 請用 'whole_body'")
+
+                F_up = self._gate_fuse(
+                    self.motion_scorer_upper,
+                    motion['motion_upper_L'], motion['motion_upper_S'],
+                    F_L_up, F_S_up, tag=' upper')
+                F_low = self._gate_fuse(
+                    self.motion_scorer_lower,
+                    motion['motion_lower_L'], motion['motion_lower_S'],
+                    F_L_low, F_S_low, tag=' lower')
+
+
+        if F_up is not None:
+            pass  # (mode = dual_gate 且 motion_inject != 'none')，已經在上面做完 gating
+
+        elif self.mode == 'dual_gate':
+            F_up = self._gate_fuse(
+                self.motion_scorer_upper,
+                motion['motion_upper_L'], motion['motion_upper_S'],
+                F_L, F_S, tag=' upper')
+            F_low = self._gate_fuse(
+                self.motion_scorer_lower,
+                motion['motion_lower_L'], motion['motion_lower_S'],
+                F_L, F_S, tag=' lower')
+
+        elif self.mode == 'per_gate':
+            F_up = F_low = self._gate_fuse(
+                self.motion_scorer,
+                motion['motion_L'], motion['motion_S'], F_L, F_S)
+
+        elif self.mode == 'dual_window':
+            F_up = F_low = 0.5 * F_L + 0.5 * F_S
+
+        elif self.mode == 'learnable':
+            alpha = torch.sigmoid(self.alpha_logit).view(1, -1)
+            F_up = F_low = alpha * F_L + (1.0 - alpha) * F_S
+
+        elif self.mode == 'long_only':
+            F_up = F_low = F_L
+
+        elif self.mode == 'short_only':
+            F_up = F_low = F_S
+
+        F_up = F_up.view(B, self.out_channels, 1, 1, 1)
+        F_low = F_low.view(B, self.out_channels, 1, 1, 1)
+
         if self.debug and not self._printed_once:
-            print(f"[DualWindowGatingNeck DEBUG] 裁切後的小視窗 shape(注意這裡已經是被降採樣過了): {x_small.shape}")
+            print(f"[DualWindowGatingNeck DEBUG] F_up {tuple(F_up.shape)}  "
+                  f"F_low {tuple(F_low.shape)}\n")
 
-        F_S = self.temporal_pool(self.spatial_pool(x_small)).view(B, -1) # shape: [B, C]
-
-        # --- Gating Fusion ---
-        g_in = torch.cat([F_L, F_S, sg_features], dim=1) 
-
-        # MLP 產生 2 個 Logits
-        abc = self.gating_machine(g_in)
-
-        # Softmax 產生 alpha, beta (相加為 1)
-        gating_weights = self.softmax(abc)
-        alpha = gating_weights[:, 0:1] # shape: [B, 1]
-        beta = gating_weights[:, 1:2]  # shape: [B, 1]
-        
-        if self.debug and not self._printed_once:
-            print(f"[Gating] Alpha (大視窗權重): {alpha[0].item():.4f}, Beta (小視窗權重): {beta[0].item():.4f}")
-
-        F_fused = alpha * F_L + beta * F_S
-
-        # 為了能順利送進 Head
-        F_fused = F_fused.view(B, self.out_channels, 1, 1, 1)
-
-        if self.debug and not self._printed_once:
-            print(f"[DualWindowGatingNeck DEBUG] 輸出的 F_fused shape: {F_fused.shape}\n")
-
-        # 跑完第一次 forward 後，永遠關閉列印開關
         self._printed_once = True
+
+        # 一律回傳 (上半身特徵, 下半身特徵)；非 dual 模式兩者是同一個張量
+        return (F_up, F_low), dict()
+
+    def _gate_fuse(self, scorer, motion_L, motion_S, F_L, F_S, tag=''):
+        """長短視窗的 motion 經 scorer → 跨視窗 softmax → 逐通道融合"""
+        # 沿 batch 維 concat，讓長短視窗共用同一份 BN 統計
+        motion_pair = torch.cat([motion_L, motion_S], dim=0)
+        score_pair = scorer(motion_pair)
+        score_L, score_S = score_pair.chunk(2, dim=0)
+
+        weights = torch.softmax(
+            torch.stack([score_L, score_S], dim=1), dim=1)
+        alpha, beta = weights[:, 0], weights[:, 1]   # 各為 [B, C]
+
+        if self.debug and (not self._printed_once or
+                           (self.training and self._step % 200 == 0)):
+            a = alpha.detach().float()
+            print(f"[Gating{tag}] step {self._step}  "
+                  f"alpha mean {a.mean().item():.4f}  "
+                  f"跨通道 std {a.std(dim=1).mean().item():.4f}  "
+                  f"跨樣本 std {a.mean(dim=1).std().item():.4f}")
+
+        return alpha * F_L + beta * F_S
     
-        # 回傳 Tuple，第二個位置留給空的 aux_loss 字典 (MMAction2 標準格式)
-        return F_fused, dict() # 只要最後 head 有算 loss，整條鏈上所有可訓練參數都會被 autograd 照顧到。不用特地傳 alpha, beta 的 loss(應該)
+    def _stack_motion(self, data_samples, key, batch_size, device, expect_dim):
+        motion_list = [
+            torch.as_tensor(
+                getattr(sample, key),
+                dtype=torch.float32,
+                device=device
+            ).flatten()
+            for sample in data_samples
+        ]
+
+        motion = torch.stack(motion_list, dim=0)
+
+        assert motion.shape[1] == expect_dim, \
+            f"{key} 維度錯誤：{motion.shape[1]} vs {expect_dim}"
+
+        assert batch_size % motion.shape[0] == 0, \
+            f"batch size {batch_size} 無法對應 {motion.shape[0]} 筆 motion"
+
+        if motion.shape[0] != batch_size:
+            repeat = batch_size // motion.shape[0]
+            motion = motion.repeat_interleave(repeat, dim=0)
+
+        return motion

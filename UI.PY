@@ -25,17 +25,17 @@ class EpeeDashboard(QMainWindow):
         mid_layout = QVBoxLayout()
         
         block_b = self.create_placeholder("Block B\n戰術流向分析區", "#FFF9C4")
-        block_d = self.create_placeholder("Block D\n該回合影片播放區", "#212121", text_color="white")
+        #block_d = self.create_placeholder("Block D\n該回合影片播放區", "#212121", text_color="white")
         block_c = self.create_placeholder("Block C\n三軌並行視覺化列表", "#C8E6C9")
 
-        mid_layout.addWidget(block_b, 4) 
-        mid_layout.addWidget(block_d, 5) 
-        mid_layout.addWidget(block_c, 4) 
+        mid_layout.addWidget(block_b, 5) 
+        #mid_layout.addWidget(block_d, 5) 
+        mid_layout.addWidget(block_c, 5) 
         
         top_layout.addLayout(mid_layout)
 
         # F: 右側控制面板
-        block_f = self.create_placeholder("Block F \n 控制面板", "#FCE4EC")
+        block_f = self.create_placeholder("Block E \n 控制面板", "#FCE4EC")
         block_f.setFixedWidth(300)
         top_layout.addWidget(block_f)
 
@@ -43,7 +43,7 @@ class EpeeDashboard(QMainWindow):
         main_layout.addLayout(top_layout, 8) 
 
         # E: 累積得分階梯圖
-        block_e = self.create_placeholder("Block E\n累積得分階梯圖", "#E0E0E0")
+        block_e = self.create_placeholder("Block D\n累積得分階梯圖", "#E0E0E0")
         main_layout.addWidget(block_e, 2) 
 
     def create_placeholder(self, text, bg_color, text_color="black"):
@@ -58,7 +58,7 @@ class EpeeDashboard(QMainWindow):
         # === 正式論文字體設定 ===
         font = QFont()
         font.setFamilies(["標楷體", "Times New Roman", "serif"])  # 中文優先標楷體，英文優先 Times New Roman
-        font.setPointSize(22)
+        font.setPointSize(30)
         font.setBold(True)
         label.setFont(font)
         

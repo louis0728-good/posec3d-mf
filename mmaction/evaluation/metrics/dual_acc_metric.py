@@ -39,8 +39,8 @@ class DualAccMetric(AccMetric):
             gt_upper = label[0].item()
             gt_lower = label[1].item()
             # 抓出預測分數 (我們在 DualBaseHead 裡塞進去的屬性)
-            pred_upper = data_sample['pred_score_upper']
-            pred_lower = data_sample['pred_score_lower']
+            pred_upper = data_sample.get('pred_score_upper')
+            pred_lower = data_sample.get('pred_score_lower')
             # 應該是原本的 pred = data_sample['pred_score']
             
             if pred_upper is None or pred_lower is None:
@@ -83,8 +83,8 @@ class DualAccMetric(AccMetric):
         #labels = [x['label'] for x in results]
 
         eval_results = dict()
-        orig_topk = self.metric_options.get('top_k_accuracy', {}).get('topk', (1, 5))
-        if isinstance(orig_topk, int): orig_topk = (orig_topk,)
+        # 上下半身都只算 top-1
+        self.metric_options['top_k_accuracy'] = dict(topk=(1, ))
         """
         acc_metric.py 說
         topk = metric_options.setdefault('top_k_accuracy', {}).setdefault('topk', (1, 5))
@@ -92,20 +92,26 @@ class DualAccMetric(AccMetric):
         preds_upper = [x['pred_upper'] for x in results]
         labels_upper = [x['gt_upper'] for x in results]
         # 呼叫老爹的 calculate，它會自動幫我們算 top-1, top-5...
-        
-        self.metric_options['top_k_accuracy'] = dict(topk=tuple(k for k in orig_topk if k <= 2))
         upper_metrics = self.calculate(preds_upper, labels_upper)
         # 在輸出的指標名稱前面加上 'upper_' 以作區別
-        for k, v in upper_metrics.items():
-            eval_results[f'upper_{k}'] = v
 
         # === 計算下半身 (Lower Body) 指標 ===
         preds_lower = [x['pred_lower'] for x in results]
         labels_lower = [x['gt_lower'] for x in results]
-
-        self.metric_options['top_k_accuracy'] = dict(topk=orig_topk)
-        
         lower_metrics = self.calculate(preds_lower, labels_lower)
+
+        # === 綜合指標放最前面 ===
+        # 用 mean1 (per-class recall 平均) 而非 top1，避免被多數類灌水
+        if 'mean1' in upper_metrics and 'mean1' in lower_metrics:
+            eval_results['mean1'] = (upper_metrics['mean1'] +
+                                     lower_metrics['mean1']) / 2
+        if 'top1' in upper_metrics and 'top1' in lower_metrics:
+            eval_results['top1'] = (upper_metrics['top1'] +
+                                    lower_metrics['top1']) / 2
+
+        for k, v in upper_metrics.items():
+            eval_results[f'upper_{k}'] = v
+        
         # 在輸出的指標名稱前面加上 'lower_' 以作區別
         for k, v in lower_metrics.items():
             eval_results[f'lower_{k}'] = v

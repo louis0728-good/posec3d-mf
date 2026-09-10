@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmengine.model import BaseModule
 
-from mmaction.evaluation import top_k_accuracy
 from mmaction.registry import MODELS
 from mmaction.utils import ForwardResults, SampleList
 
@@ -53,24 +52,35 @@ class DualBaseHead(BaseModule, metaclass=ABCMeta):
     """
 
     def __init__(self,
-                 num_classes_upper: int,
-                 num_classes_lower: int,
-                 in_channels: int,
-                 loss_cls: Dict = dict(
-                     type='CrossEntropyLoss', loss_weight=1.0),
-                 multi_class: bool = False,
-                 label_smooth_eps: float = 0.0,
-                 topk: Union[int, Tuple[int]] = (1, 5),
-                 average_clips: Optional[Dict] = None,
-                 init_cfg: Optional[Dict] = None) -> None:
+                num_classes_upper: int,
+                num_classes_lower: int,
+                in_channels: int,
+                loss_cls: Dict = dict(
+                    type='CrossEntropyLoss', loss_weight=1.0),
+                loss_cls_upper: Optional[Dict] = None,   # 新增 下半身的 loss config
+                loss_cls_lower: Optional[Dict] = None,   # 新增 上半身的 loss config
+                loss_weight_upper: float = 1.0,          # 新增 上半身的懲罰權重
+                loss_weight_lower: float = 1.0,          # 新增 下半身的懲罰權重
+                multi_class: bool = False,
+                label_smooth_eps: float = 0.0,
+                topk: Union[int, Tuple[int]] = (1, ),
+                average_clips: Optional[Dict] = None,
+                debug: bool = False,              # ← 新增
+                init_cfg: Optional[Dict] = None) -> None:
         super(DualBaseHead, self).__init__(init_cfg=init_cfg)
         self.num_classes_upper = num_classes_upper
         self.num_classes_lower = num_classes_lower
         self.in_channels = in_channels
-        self.loss_cls = MODELS.build(loss_cls)
+        # 兩個頭各建一份 loss，才能對 2 類 / 6 類分別套用 class_weight
+        self.loss_cls_upper = MODELS.build(loss_cls_upper or loss_cls)
+        self.loss_cls_lower = MODELS.build(loss_cls_lower or loss_cls)
+        self.loss_weight_upper = loss_weight_upper
+        self.loss_weight_lower = loss_weight_lower
+
         self.multi_class = multi_class
         self.label_smooth_eps = label_smooth_eps
         self.average_clips = average_clips
+        self.debug = debug
         assert isinstance(topk, (int, tuple))
         if isinstance(topk, int):
             topk = (topk, )
@@ -106,7 +116,6 @@ class DualBaseHead(BaseModule, metaclass=ABCMeta):
             處理邊界情況（標量標籤、batch size=1 的 soft label）。
             如果是硬標籤，計算 top-k accuracy 作為指標。
             若啟用 label smoothing，將硬標籤轉為 one-hot 後做平滑。
-            用 self.loss_cls 計算分類損失並回傳所有 loss 組件的字典。
         """
 
     def loss_by_feat(self, cls_scores: Tuple[torch.Tensor, torch.Tensor],
@@ -152,71 +161,55 @@ class DualBaseHead(BaseModule, metaclass=ABCMeta):
         labels_upper = labels[:, 0] # labels[:, 0]: 我要「所有橫列 (:)」的「第 0 個直欄 (0)」，也就是把上半身的答案全部抽出來。
         labels_lower = labels[:, 1] # abels[:, 1] 則是抽出「第 1 個直欄」，也就是下半身答案。
 
-        if labels.min().item() < 0:
-            raise ValueError(f'[DualBaseHead] 發現負標籤: labels={labels}')
-
-        if labels_upper.max().item() >= cls_score_upper.shape[1]:
-            raise ValueError(
-                f'[DualBaseHead] upper label 越界: max={labels_upper.max().item()}, '
-                f'num_classes={cls_score_upper.shape[1]}'
-            )
-
-        if labels_lower.max().item() >= cls_score_lower.shape[1]:
-            raise ValueError(
-                f'[DualBaseHead] lower label 越界: max={labels_lower.max().item()}, '
-                f'num_classes={cls_score_lower.shape[1]}'
-            )
-
-        if cls_score_upper.shape[0] != labels.shape[0] or cls_score_lower.shape[0] != labels.shape[0]:
-            raise ValueError(
-                f'[DualBaseHead] batch size 對不上: '
-                f'upper={cls_score_upper.shape[0]}, lower={cls_score_lower.shape[0]}, labels={labels.shape[0]}'
-            )
-
         losses = dict()
+        if self.debug:
+            if labels.min().item() < 0:
+                raise ValueError(f'[DualBaseHead] 發現負標籤: labels={labels}')
 
-        assert labels_upper.max() < cls_score_upper.shape[1], \
-            f"[DualBaseHead] upper label {labels_upper.max()} >= num_classes {cls_score_upper.shape[1]}"
-        assert labels_lower.max() < cls_score_lower.shape[1], \
-            f"[DualBaseHead] lower label {labels_lower.max()} >= num_classes {cls_score_lower.shape[1]}"
+            if labels_upper.max().item() >= cls_score_upper.shape[1]:
+                raise ValueError(
+                    f'[DualBaseHead] upper label 越界: max={labels_upper.max().item()}, '
+                    f'num_classes={cls_score_upper.shape[1]}'
+                )
+
+            if labels_lower.max().item() >= cls_score_lower.shape[1]:
+                raise ValueError(
+                    f'[DualBaseHead] lower label 越界: max={labels_lower.max().item()}, '
+                    f'num_classes={cls_score_lower.shape[1]}'
+                )
+
+            if cls_score_upper.shape[0] != labels.shape[0] or cls_score_lower.shape[0] != labels.shape[0]:
+                raise ValueError(
+                    f'[DualBaseHead] batch size 對不上: '
+                    f'upper={cls_score_upper.shape[0]}, lower={cls_score_lower.shape[0]}, labels={labels.shape[0]}'
+                )
+
+            losses = dict()
+
+            assert labels_upper.max() < cls_score_upper.shape[1], \
+                f"[DualBaseHead] upper label {labels_upper.max()} >= num_classes {cls_score_upper.shape[1]}"
+            assert labels_lower.max() < cls_score_lower.shape[1], \
+                f"[DualBaseHead] lower label {labels_lower.max()} >= num_classes {cls_score_lower.shape[1]}"
     
-        # 上半身：只取不超過類別數的 k 值
-        topk_upper = tuple(k for k in self.topk if k <= cls_score_upper.shape[1])
-        if topk_upper:
-            top_k_acc_upper = top_k_accuracy(
-                cls_score_upper.detach().cpu().numpy(),
-                labels_upper.detach().cpu().numpy(),
-                topk_upper)
-            for k, a in zip(topk_upper, top_k_acc_upper):
-                losses[f'top{k}_acc_upper'] = torch.tensor(
-                    a, device=cls_score_upper.device)
-
-        # 下半身
-        topk_lower = tuple(k for k in self.topk if k <= cls_score_lower.shape[1])
-        if topk_lower:
-            top_k_acc_lower = top_k_accuracy(
-                cls_score_lower.detach().cpu().numpy(),
-                labels_lower.detach().cpu().numpy(),
-                topk_lower)
-            for k, a in zip(topk_lower, top_k_acc_lower):
-                losses[f'top{k}_acc_lower'] = torch.tensor(
-                    a, device=cls_score_lower.device)
+        # top-1 準確率：全程留在 GPU，避免每 iter 4 次強制同步
+        with torch.no_grad():
+            losses['top1_acc_upper'] = (
+                cls_score_upper.argmax(1) == labels_upper).float().mean()
+            losses['top1_acc_lower'] = (
+                cls_score_lower.argmax(1) == labels_lower).float().mean()
                 
-        # 計算上半身 Loss
-        loss_upper = self.loss_cls(cls_score_upper, labels_upper)
-        if isinstance(loss_upper, dict):
-            print(loss_upper.keys())
-            losses.update(loss_upper)
-        else:
-            losses['loss_cls_upper'] = loss_upper
+        # === label smoothing（原本收了參數卻沒實作）===
+        tgt_upper, tgt_lower = labels_upper, labels_lower
+        if self.label_smooth_eps != 0:
+            e = self.label_smooth_eps
+            nu, nl = cls_score_upper.shape[1], cls_score_lower.shape[1]
+            tgt_upper = (1 - e) * F.one_hot(labels_upper, nu).float() + e / nu
+            tgt_lower = (1 - e) * F.one_hot(labels_lower, nl).float() + e / nl
 
-        # 計算下半身 Loss
-        loss_lower = self.loss_cls(cls_score_lower, labels_lower)
-        if isinstance(loss_lower, dict):
-            print(loss_lower.keys()) # 如果是 CrossEntropyLoss 且回傳的是 torch.Tensor，那就不用擔心覆蓋問題。
-            losses.update(loss_lower)
-        else:
-            losses['loss_cls_lower'] = loss_lower
+        losses['loss_cls_upper'] = self.loss_weight_upper * \
+            self.loss_cls_upper(cls_score_upper, tgt_upper)
+        losses['loss_cls_lower'] = self.loss_weight_lower * \
+            self.loss_cls_lower(cls_score_lower, tgt_lower)
 
         return losses
 
@@ -273,11 +266,12 @@ class DualBaseHead(BaseModule, metaclass=ABCMeta):
         """
 
         cls_score_upper, cls_score_lower = cls_scores
-        if not torch.isfinite(cls_score_upper).all():
-            raise FloatingPointError('[DualBaseHead] cls_score_upper 出現 NaN 或 Inf')
+        if self.debug:  
+            if not torch.isfinite(cls_score_upper).all():
+                raise FloatingPointError('[DualBaseHead] cls_score_upper 出現 NaN 或 Inf')
 
-        if not torch.isfinite(cls_score_lower).all():
-            raise FloatingPointError('[DualBaseHead] cls_score_lower 出現 NaN 或 Inf')
+            if not torch.isfinite(cls_score_lower).all():
+                raise FloatingPointError('[DualBaseHead] cls_score_lower 出現 NaN 或 Inf')
 
         num_segs = cls_score_upper.shape[0] // len(data_samples)
 
@@ -301,6 +295,9 @@ class DualBaseHead(BaseModule, metaclass=ABCMeta):
             data_sample.set_field(pred_l, 'pred_label_lower')
             
             # 給底層一個預設值防呆
+            #    DualAccMetric 讀的是上面的 pred_score_upper / pred_score_lower。
+            #    若改用原生 AccMetric、或 tools/test.py --dump，
+            #    拿到的會「只有上半身」，且 num_classes metainfo 會被寫成 2。
             data_sample.set_pred_score(score_u) 
             data_sample.set_pred_label(pred_u)
 

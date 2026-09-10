@@ -2,7 +2,7 @@ import mmengine
 import numpy as np
 import random
 
-pkl_path = r'pkl/ntu60_2d.pkl'
+pkl_path = r'pkl/train_val.pkl'
 data = mmengine.load(pkl_path)
 
 print(' keys: ', list(data.keys()))
@@ -11,7 +11,8 @@ anno = random.choice(data['annotations'])
 print('\nannotation keys: ', list(anno.keys()))
 
 print(f'\nframe_dir:      {anno["frame_dir"]}')
-print(f'label:          {anno["label"]}')
+print(f"label_upper:    {anno['label_upper']}")
+print(f"label_lower:    {anno['label_lower']}")
 print(f'img_shape:      {anno["img_shape"]}')
 print(f'total_frames:   {anno["total_frames"]}')
 print(f'keypoint shape: {anno["keypoint"].shape}')         # 預期 (2, T, 17, 2)

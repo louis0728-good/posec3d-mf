@@ -1,4 +1,3 @@
-# python tools/train.py "E:\rcnn\mmaction2\configs\skeleton\posec3d\slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint.py"
 load_from = 'checkpoints/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint_20220815-38db104b.pth'
 custom_imports = dict( # key: 'imports', value 後面的東西
     imports=[
@@ -29,28 +28,22 @@ model = dict(
         pretrained=None, # 未來遷移訓練這部分可能要改
         in_channels=17, # backbone 輸入通道數是 17 個關鍵點 
         base_channels=32,
-        num_stages=3, # 1, 2, 3 三個 stage
-        out_indices=(1, 2), # 現在改成輸出 STAGE 2 和 STAGE 3，分別時解析度與全域視野(就是那個神經網路的 p) 
-        # 對應 stage 2, 3
-        stage_blocks=(4, 6, 3), #　每個　stage 幾個 blocks，blocks = Residual Blocks，要做幾次時間卷積
+        num_stages=3,
+        out_indices=(1, 2), # 現在改成輸出 layer 2 和 layer 3，分別時解析度與全域視野(就是那個神經網路的 p) 
+        stage_blocks=(4, 6, 3), #　每個　stage 幾個 blocks，blocks = Residual Blocks
         conv1_stride_s=1,
         pool1_stride_s=1,
-        inflate=(0, 1, 1), # 卷積核尺寸，改成 1 後就會變成 3維，開始根據 kernel 大小去看時間的部份
+        inflate=(0, 1, 1),
         spatial_strides=(2, 2, 2),
         temporal_strides=(1, 1, 2), #　會影響 T（時間長度）有沒有被下採樣　看起來是有（最後一個）
-        # stage 1, 2, 3
         dilations=(1, 1, 1)),
     neck=dict( #　這是 backbone 和 head 的中間區塊
         type='DualWindowGatingNeck',
         in_channels=512,    # ResNet50 stage 3 的輸出通道數通常是 512。預期 backbone 傳進來的 feature channel 是 512。 可以確認 backbone output.shape
         l2_in_channels=256,   # 新增：layer2 的輸出通道數
-        motion_dim_whole=72,   
-        motion_dim_part=36, 
+        sg_feat_dim=340,    # 記得確認 S-G 特徵真實維度 (大視窗單人 136 + 小視窗單人 136) (後來又多加了靜位移與方向一致性)看 SG_filter.py 的實作。
         out_channels=512,
-        crop_margin=9, 
-        mode='dual_gate',      # ← 或 'per_gate', 'dual_gate', 'dual_window', 'long_only', 'short_only', 'learnable'
-        motion_inject='gamma', # beta 運動獨立參數用加的，gamma 用乘的，none 不注入
-        inject_scope='upper_lower', # whole_body: 全身兩個 key，upper_lower: 上下半身各兩個 key
+        crop_margin=3, 
         debug=True          # 開啟 debug 方便確認維度
     ),
     cls_head=dict(
@@ -58,7 +51,7 @@ model = dict(
         debug=False,        # （想開除錯時改 True）
         in_channels=512, # 表示 head 預期從 neck 收到的特徵 channel 是 512。
         num_classes_upper=2, # 上半身標籤
-        num_classes_lower=6, # 下半身標籤
+        num_classes_lower=6, # 下
         dropout_ratio=0.5,
         average_clips='prob',
         topk=(1, ),                       # 新增：關掉訓練 log 的假 top5
@@ -69,8 +62,8 @@ model = dict(
             class_weight=[1.00, 1.48]),
         loss_cls_lower=dict(              # 新增
             type='CrossEntropyLoss',
-            class_weight=[1.26, 1.13, 1.00, 2.69, 2.41, 1.51]))) # 不是先平均 logits 再 softmax，而是先變成 probability 再平均
-            # 或  [1.58, 1.27, 1.00, 7.26, 5.79, 2.28]當消融
+            class_weight=[1.58, 1.27, 1.00, 7.26, 5.79, 2.28]))) # 不是先平均 logits 再 softmax，而是先變成 probability 再平均
+            # 或 [1.26, 1.13, 1.00, 2.69, 2.41, 1.51] 當消融
 """
 所以整條鏈目前是：
 
@@ -127,11 +120,7 @@ train_pipeline = [
         with_limb=False),
     dict(type='FormatShape', input_format='NCTHW_Heatmap'), # 這一步把資料整理成 backbone 要吃的 5 維格式 (N, C, T, H, W)。
     #dict(type='PackActionInputs'), 原
-    dict(type='PackActionInputs',
-         meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'),
-         algorithm_keys=('motion_L', 'motion_S',
-                         'motion_upper_L', 'motion_upper_S',
-                         'motion_lower_L', 'motion_lower_S'))
+    dict(type='PackActionInputs', meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'), algorithm_keys=('sg_features',))
     # PackActionInputs 在 formatting.py
     # sg_features 應該會在 results['sg_features'] = sg_features.astype(np.float32)，SG_FILTER.PY 包裝好
 ]
@@ -159,11 +148,7 @@ val_pipeline = [
         with_limb=False),
     dict(type='FormatShape', input_format='NCTHW_Heatmap'),
     #dict(type='PackActionInputs'),
-    dict(type='PackActionInputs',
-         meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'),
-         algorithm_keys=('motion_L', 'motion_S',
-                         'motion_upper_L', 'motion_upper_S',
-                         'motion_lower_L', 'motion_lower_S'))
+    dict(type='PackActionInputs', meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'), algorithm_keys=('sg_features',))
 ]
 test_pipeline = [
     dict(
@@ -184,11 +169,7 @@ test_pipeline = [
         right_kp=right_kp),
     dict(type='FormatShape', input_format='NCTHW_Heatmap'),
     #dict(type='PackActionInputs'),
-    dict(type='PackActionInputs',
-         meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'),
-         algorithm_keys=('motion_L', 'motion_S',
-                         'motion_upper_L', 'motion_upper_S',
-                         'motion_lower_L', 'motion_lower_S'))
+    dict(type='PackActionInputs', meta_keys=('img_shape', 'ori_shape', 'frame_dir', 'clip_start'), algorithm_keys=('sg_features',))
 ]
 # 這段就是決定訓練資料如何進模型。
 train_dataloader = dict(
@@ -243,7 +224,7 @@ val_evaluator = [dict(type='DualAccMetric')] # 改 原 val_evaluator = [dict(typ
 test_evaluator = val_evaluator
 
 train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=16, val_begin=1, val_interval=1)
+    type='EpochBasedTrainLoop', max_epochs=24, val_begin=1, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
@@ -252,7 +233,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         eta_min=0,
-        T_max=16,
+        T_max=24,
         by_epoch=True,
         convert_to_iter_based=True)
 ]
@@ -266,9 +247,9 @@ optim_wrapper = dict(
         'neck':     dict(lr_mult=1.0),   # 實際 lr = 0.04,從零開始學
         'cls_head': dict(lr_mult=1.0),   # 實際 lr = 0.04,從零開始學
     }),
-    clip_grad=dict(max_norm=10, norm_type=2))
+    clip_grad=dict(max_norm=40, norm_type=2))
 
-randomness = dict(seed=44, deterministic=False)
+randomness = dict(seed=42, deterministic=False)
 env_cfg = dict(cudnn_benchmark=True)
 
 default_hooks = dict(

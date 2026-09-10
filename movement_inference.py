@@ -1,20 +1,40 @@
 import mmengine
+import sys
+import argparse
+import torch
 import numpy as np
 import os
 import glob
 import cv2
 import json
+from tqdm import tqdm
 from mmaction.apis import init_recognizer, inference_recognizer
 from PIL import Image, ImageDraw, ImageFont
 
-MAMA_dir = os.path.dirname(os.path.abspath(__file__))
-DETECTIONS_DIR = os.path.normpath(
-    os.path.join(MAMA_dir, '..', 'ultralytics', 'output_videos', '2d_detections')
-)
-INPUT_VIDEO_DIR = os.path.normpath(
-    os.path.join(MAMA_dir, '..', 'ultralytics', 'output_videos')
-)
-RESULT_DIR = os.path.join(MAMA_dir, 'outputs_videos')
+_orig_torch_load = torch.load
+def _patched_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_load
+
+KEYPOINT_BASE = r"D:\project\2d_output_videos"     # ViTPose 輸出的 2D 關鍵點 JSON 根目錄
+INPUT_VIDEO_BASE = r"D:\project\clipped"          # 原始影片根目錄
+RESULT_BASE = r"D:\project\action_output_videos"  # 動作辨識輸出根目錄 (會自動保留資料夾結構)
+
+def parse_args():
+    ap = argparse.ArgumentParser(description='PoseC3D 動作辨識')
+    ap.add_argument('--keypoint_base',    default=KEYPOINT_BASE)
+    ap.add_argument('--input_video_base', default=INPUT_VIDEO_BASE)
+    ap.add_argument('--result_base',      default=RESULT_BASE)
+    ap.add_argument('--match', default=None,
+                    help='只處理這一場（子資料夾名），不給就全部')
+    ap.add_argument('--config',
+        default="configs/skeleton/posec3d/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint.py")
+    ap.add_argument('--checkpoint',
+        default="checkpoints/best.pth")
+    return ap.parse_args()
+
 
 # 每個人的顏色
 PERSON_COLORS = {
@@ -43,9 +63,8 @@ NTU60_LABELS = [
         '握手', '走向彼此', '離開彼此'
     ]
 
-UPPER_LABELS = ['上半身類別0', '上半身類別1']  # 2 類
-LOWER_LABELS = ['下半身類別0', '下半身類別1', '下半身類別2', '下半身類別3',
-                '下半身類別4', '下半身類別5', '下半身類別6']  # 7 類
+UPPER_LABELS = ['無', '直刺']
+LOWER_LABELS = ['無', '前進', '後退', '長刺', '飛刺', ' 前進長刺'] 
 
 def load_person_jsons(json_dir): # 這裡先把所以人的 json 都累積起來
     # 讀取某一個人資料夾裡所有 .json，回傳 (video_name, total_frames, xy, score)
@@ -112,11 +131,26 @@ def sliding_window(model, person_kp, person_kps, img_shape, window_size=21, stri
     total_frames = person_kp.shape[1]
     results = []
 
-    for start in range(0, total_frames - window_size + 1, stride):
+    for start in tqdm(range(0, total_frames - window_size + 1, stride),
+                      desc='  推論中', leave=False):
         end = start + window_size
 
         clip_kp = person_kp[:, start:end, :, :]
         clip_kps = person_kps[:, start:end, :]
+
+        # 有效幀檢查與前向填補 (防呆)
+        valid = ~np.all(clip_kp == 0, axis=(2, 3))[0]     # (21,) 每幀是否有偵測
+        if valid.sum() < 15:                              # 有效幀不足就跳過
+            continue
+            
+        clip_kp = clip_kp.copy()
+        clip_kps = clip_kps.copy()
+        last = None
+        for t in range(clip_kp.shape[1]):
+            if valid[t]:
+                last = (clip_kp[:, t].copy(), clip_kps[:, t].copy())
+            elif last is not None:
+                clip_kp[:, t], clip_kps[:, t] = last
 
         if np.all(clip_kp == 0):
             continue
@@ -229,97 +263,119 @@ def export_labeled_video(video_path, results, fps, total_frames, output_path):
 
 
 def main():
-    config_path = "configs/skeleton/posec3d/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint.py"
-    checkpoint_path = "configs/skeleton/posec3d/checkpoints/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint_20220815-38db104b.pth"
+    args = parse_args()
     # 到時候要換
 
     print("正在載入模型...")
-    model = init_recognizer(config_path, None, device="cuda:0") # None 要改
+    model = init_recognizer(args.config, args.checkpoint, device="cuda:0")
 
-    video_dirs = sorted([
-        d for d in glob.glob(os.path.join(DETECTIONS_DIR, '*'))
-        if os.path.isdir(d)
-    ])
+    # 取得 2D 骨架底下的所有子資料夾 (ex: 1-8(1)-1)
+    sub_dirs = [d for d in os.listdir(args.keypoint_base)
+                if os.path.isdir(os.path.join(args.keypoint_base, d))]
 
-    if not video_dirs:
-        print(f'在 {DETECTIONS_DIR} 下找不到任何影片資料夾')
+    if args.match:
+        sub_dirs = [d for d in sub_dirs if d == args.match]
+
+    if not sub_dirs:
+        print(f'在 {args.keypoint_base} 下找不到任何子資料夾')
         return
 
-    os.makedirs(RESULT_DIR, exist_ok=True)
-    print(f'找到 {len(video_dirs)} 部影片\n')
+    failed = []
+    print(f'找到 {len(sub_dirs)} 個子資料夾等待處理\n')
 
-    for vdir in video_dirs:
-        video_name = os.path.basename(vdir)
-        video_path = os.path.join(INPUT_VIDEO_DIR, f'{video_name}.mp4')
+    # 第一層：遍歷子資料夾 (ex: 1-8(1)-1)
+    for sub_dir in sub_dirs:
+        sub_keypoint_dir = os.path.join(args.keypoint_base, sub_dir)
+        video_dirs = sorted([d for d in glob.glob(os.path.join(sub_keypoint_dir, '*')) if os.path.isdir(d)])
 
-        print(f'=== 正在處理: {video_name} ===')
-
-        if not os.path.exists(video_path):
-            print(f'  [跳過] 找不到對應影片: {video_path}\n')
+        if not video_dirs:
             continue
 
-        output_video = os.path.join(RESULT_DIR, f'{video_name}.mp4')
-        if os.path.exists(output_video):
-            print(f'  [跳過] 輸出影片已存在: {output_video}')
-            continue
+        print(f'=== 正在處理子資料夾: {sub_dir} (共 {len(video_dirs)} 部影片) ===')
 
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-        if fps == 0:
-            fps = 30.0
+        # 第二層：遍歷子資料夾內的各影片骨架目錄 (ex: test001)
+        for vdir in video_dirs:
+            video_name = os.path.basename(vdir)
+            try:
+                video_path = os.path.join(args.input_video_base, sub_dir, f'{video_name}.mp4')
 
-        # 讀取每個人的骨架，直接從 JSON 載入
-        all_results = []
-        total_frames = 0
-        for pid in [1, 2]:
-            person_dir = os.path.join(vdir, str(pid))
-            if not os.path.isdir(person_dir):
-                print(f'  [跳過] 人物 {pid}（資料夾不存在）')
+                print(f'--- 處理影片: {video_name} ---')
+
+                if not os.path.exists(video_path):
+                    print(f'  [跳過] 找不到對應原始影片: {video_path}\n')
+                    continue
+
+                # 為每部影片建立專屬輸出資料夾 (ex: D:\project\action_output_videos\1-8(1)-1\test001\)
+                video_result_dir = os.path.join(args.result_base, sub_dir, video_name)
+                os.makedirs(video_result_dir, exist_ok=True)
+
+                output_video = os.path.join(video_result_dir, f'{video_name}_action.mp4')
+                output_json = os.path.join(video_result_dir, f'{video_name}_action.json')
+
+                if os.path.exists(output_video) and os.path.exists(output_json):
+                    print(f'  [跳過] 輸出已存在: {video_name}\n')
+                    continue
+
+                cap = cv2.VideoCapture(video_path)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                cap.release()
+                if fps == 0 or np.isnan(fps):
+                    fps = 30.0
+
+                # 讀取每個人的骨架 JSON
+                all_results = []
+                total_frames = 0
+                for pid in [1, 2]:
+                    person_dir = os.path.join(vdir, str(pid))
+                    if not os.path.isdir(person_dir):
+                        print(f'  [跳過] 人物 {pid}（資料夾不存在）')
+                        continue
+
+                    _, total_frames, xys, scores, img_shape = load_person_jsons(person_dir)
+                    person_kp = xys[np.newaxis, ...]
+                    person_kps = scores[np.newaxis, ...]
+
+                    if np.all(person_kp == 0):
+                        print(f'  [跳過] 人物 {pid} 所有幀都是 0')
+                        continue
+
+                    # 滑動視窗推論
+                    results = sliding_window(model, person_kp, person_kps, img_shape, window_size=21, stride=1)
+
+                    for r in results:
+                        r['person_id'] = pid
+                    all_results.extend(results)
+
+                if not all_results:
+                    print(f'  [跳過] 沒有有效片段\n')
+                    continue
+
+                # 儲存獨立 JSON
+                save_data = {
+                    'video_name': f'{video_name}.mp4',
+                    'fps': fps,
+                    'total_frames': total_frames,
+                    'segments': all_results
+                }
+                with open(output_json, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, indent=2, ensure_ascii=False)
+
+                # 輸出專屬影片
+                print(f'  正在輸出標註影片...')
+                export_labeled_video(video_path, all_results, fps, total_frames, output_video)
+                print(f'  影片已儲存: {output_video}\n')
+
+            except Exception as e:
+                print(f'  [失敗] {sub_dir}/{video_name}: {type(e).__name__}: {e}\n')
+                failed.append(f'{sub_dir}/{video_name}')
                 continue
 
-            _, total_frames, xys, scores, img_shape = load_person_jsons(person_dir)
-            person_kp = xys[np.newaxis, ...]          # (T, 17, 2) -> (1, T, 17, 2)
-            person_kps = scores[np.newaxis, ...]      # 一樣 -> (1, T, 17)
-
-            # 檢查資料品質
-            empty_count = int(np.sum(np.all(xys == 0, axis=(1, 2))))
-            valid_count = total_frames - empty_count
-            print(f'  人物 {pid}: 總幀數={total_frames}, 有效={valid_count}, 空幀={empty_count}')
-
-            if np.all(person_kp == 0):
-                print(f'  [跳過] 人物 {pid} 所有幀都是 0')
-                continue
-
-            # 滑動視窗推論
-            results = sliding_window(model, person_kp, person_kps, img_shape, window_size=21, stride=1)
-
-            # 補上 person_id
-            for r in results:
-                r['person_id'] = pid
-            all_results.extend(results)
-
-        if not all_results:
-            print(f'  [跳過] 沒有有效片段\n')
-            continue
-
-        # 儲存 JSON
-        output_json = os.path.join(RESULT_DIR, f'{video_name}.json')
-        save_data = {
-            'video_name': f'{video_name}.mp4',
-            'fps': fps,
-            'total_frames': total_frames,
-            'segments': all_results
-        }
-        with open(output_json, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, indent=2, ensure_ascii=False)
-
-        # 輸出標註影片
-        print(f'  正在輸出標註影片...')
-        export_labeled_video(video_path, all_results, fps, total_frames, output_video)
-        print(f'  影片已儲存: {output_video}')
-
-    print('全部推論完成！')
+    if failed:
+        print(f'\n完成，但有 {len(failed)} 部影片失敗:')
+        for f in failed:
+            print(f'  - {f}')
+        sys.exit(1)
+    print('全部子資料夾動作推論完成！')
 
 if __name__ == '__main__':
     main()
