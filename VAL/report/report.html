@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雙視窗門控消融報告</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* 版面：單欄閱讀（約 44em），圖表放寬到 1120px；圖檔本身是淺底，所以兩種主題下都放在淺色圖版上 */
+:root {
+  --bg: #f2f4f3;
+  --surface: #ffffff;
+  --plate: #fcfcfb;
+  --ink: #15191c;
+  --ink-2: #4a5258;
+  --muted: #737c84;
+  --rule: #d8ddda;
+  --accent: #2a6fc4;
+  --accent-soft: #e2ecf9;
+  --bad: #b3302d;
+  --bad-soft: #f8e4e2;
+  --chip: #e6e9e7;
+  --code-bg: #e8ebe9;
+  --font-display: "Noto Serif TC", "Songti TC", "PMingLiU", serif;
+  --font-body: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101315; --surface: #181c1f; --plate: #fcfcfb; --ink: #eceff1; --ink-2: #b6bdc3;
+    --muted: #8b949b; --rule: #2b3136; --accent: #6aa6ef; --accent-soft: #182a3e;
+    --bad: #f08a84; --bad-soft: #3a2120; --chip: #262b2f; --code-bg: #1f2427;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101315; --surface: #181c1f; --plate: #fcfcfb; --ink: #eceff1; --ink-2: #b6bdc3;
+  --muted: #8b949b; --rule: #2b3136; --accent: #6aa6ef; --accent-soft: #182a3e;
+  --bad: #f08a84; --bad-soft: #3a2120; --chip: #262b2f; --code-bg: #1f2427;
+  color-scheme: dark;
+}
+
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body);
+       font-size: 16px; line-height: 1.8; }
+.wrap { max-width: 1120px; margin-inline: auto; padding-inline: 20px; padding-block: 48px 96px; }
+.prose { max-width: 44em; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+p { margin: 0; }
+.stack { display: grid; gap: 14px; }
+
+header { display: grid; gap: 14px; padding-bottom: 8px; }
+.eyebrow { font-size: 13px; letter-spacing: .06em; color: var(--muted); }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(30px, 4.4vw, 42px);
+     line-height: 1.25; margin: 0; text-wrap: balance; }
+.lede { font-size: 18px; color: var(--ink-2); }
+.meta { font-size: 13.5px; color: var(--muted); }
+
+h2 { font-family: var(--font-display); font-weight: 700; font-size: clamp(22px, 2.8vw, 28px);
+     line-height: 1.35; margin: 0; text-wrap: balance; }
+h3 { font-size: 17px; font-weight: 700; margin: 0; line-height: 1.5; }
+section { display: grid; gap: 18px; margin-top: 64px; padding-top: 36px; border-top: 1px solid var(--rule); }
+section.first { margin-top: 36px; }
+
+.answer { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+          padding: 22px 24px; display: grid; gap: 10px; }
+.answer .label { font-size: 13px; letter-spacing: .06em; color: var(--muted); }
+.answer p { font-size: 18px; line-height: 1.75; }
+
+.toc { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 14.5px; }
+
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule);
+              border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; line-height: 1.55; }
+th, td { padding: 11px 14px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-weight: 500; color: var(--ink-2); font-size: 13px; white-space: nowrap; background: var(--surface); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .sub { display: block; font-size: 12.5px; color: var(--muted); }
+tr.group td { background: var(--bg); color: var(--muted); font-size: 12.5px; padding-block: 6px; }
+tr.base td { font-weight: 500; }
+.q { font-weight: 500; }
+.formula { display: block; color: var(--muted); font-size: 13px; }
+table.verdict td:first-child { min-width: 13em; }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+        font-size: 13px; font-weight: 500; white-space: nowrap; }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.same { background: var(--chip); color: var(--ink-2); }
+
+figure { margin: 6px 0; display: grid; gap: 10px; }
+.plate { background: var(--plate); border: 1px solid var(--rule); border-radius: 10px; padding: 14px; }
+.plate img { display: block; width: 100%; height: auto; }
+figcaption { color: var(--ink-2); font-size: 14.5px; max-width: 52em; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 20px 22px;
+        display: grid; gap: 10px; align-content: start; min-width: 0; }
+.card .ask { font-size: 14px; color: var(--accent); font-weight: 500; }
+.card .src { font-size: 13px; color: var(--muted); }
+
+ul, ol { margin: 0; padding-left: 1.3em; display: grid; gap: 8px; }
+code { font-family: var(--font-mono); font-size: .86em; background: var(--code-bg); padding: 1px 5px;
+       border-radius: 4px; overflow-wrap: anywhere; }
+pre { margin: 0; background: var(--code-bg); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+      font-family: var(--font-mono); font-size: 13.5px; line-height: 1.65; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.two > div { min-width: 0; display: grid; gap: 10px; align-content: start; }
+.yes h3 { color: var(--accent); }
+.no h3 { color: var(--bad); }
+.note { font-size: 14px; color: var(--ink-2); }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<main class="wrap">
+  <header>
+    <p class="eyebrow">PoseC3D · DualWindowGatingNeck · 驗證集 xsub_val（516 個 clip／2062 個視窗）</p>
+    <h1>雙視窗門控消融報告</h1>
+    <p class="lede prose">資料來自 <code>work_dirs</code> 裡 34 個訓練 run（12 種設定，大多各 3 個 seed）和 <code>VAL</code> 裡 tt2.py 的診斷結果。這份報告回答一件事：你加的每個設定，有沒有讓模型變好。</p>
+    <p class="meta">2026-09-29 · 圖表與表格由 <code>VAL/make_report.py</code> 產生，輸出在 <code>VAL/report/</code></p>
+  </header>
+
+  <section class="first">
+    <div class="answer prose">
+      <span class="label">一句話結論</span>
+      <p>只有長視窗是必要的。只用短視窗時 mean1 掉 4.6 個百分點，3 個 seed 都一樣。短視窗融合、可學習權重、單門控、雙門控、運動參數 β 和 γ，重新訓練後都沒有比純長視窗好，差距都落在換個 seed 就會出現的範圍內。</p>
+    </div>
+    <div class="table-wrap">
+      <table class="verdict">
+        <thead><tr><th>問題</th><th>判定</th><th class="num">下半身 Δ<br>（95% CI）</th><th class="num">上半身 Δ<br>（95% CI）</th><th class="num">mean1 Δ</th></tr></thead>
+        <tbody>
+          <tr><td><span class="q">只用短視窗可以嗎？</span><span class="formula">純短視窗 − 純長視窗</span></td><td><span class="chip bad">▼ 顯著變差</span></td><td class="num">−6.43<span class="sub">[−9.84, −3.13]</span></td><td class="num">−2.69<span class="sub">[−4.57, −0.83]</span></td><td class="num">−4.56</td></tr>
+          <tr><td><span class="q">加上短視窗有幫助嗎？</span><span class="formula">無門控雙視窗 − 純長視窗</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">−1.03<span class="sub">[−4.24, +1.95]</span></td><td class="num">+0.15<span class="sub">[−0.88, +1.22]</span></td><td class="num">−0.44</td></tr>
+          <tr><td><span class="q">融合權重用學的有幫助嗎？</span><span class="formula">隨機學習 − 無門控雙視窗</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">−0.08<span class="sub">[−1.80, +1.56]</span></td><td class="num">+0.30<span class="sub">[−0.52, +1.15]</span></td><td class="num">+0.11</td></tr>
+          <tr><td><span class="q">用運動特徵做門控有幫助嗎？</span><span class="formula">單門控 − 無門控雙視窗</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">+0.17<span class="sub">[−1.96, +2.31]</span></td><td class="num">+0.50<span class="sub">[−0.49, +1.57]</span></td><td class="num">+0.34</td></tr>
+          <tr><td><span class="q">上下半身分開門控有幫助嗎？</span><span class="formula">雙門控 − 單門控</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">−0.21<span class="sub">[−2.14, +1.99]</span></td><td class="num">−0.33<span class="sub">[−1.40, +0.62]</span></td><td class="num">−0.27</td></tr>
+          <tr><td><span class="q">注入運動參數 β 有幫助嗎？</span><span class="formula">+β − 無注入（4 種架構合併）</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">−0.53<span class="sub">[−1.90, +0.91]</span></td><td class="num">+0.11<span class="sub">[−0.48, +0.75]</span></td><td class="num">−0.21</td></tr>
+          <tr><td><span class="q">注入運動參數 γ 有幫助嗎？</span><span class="formula">雙門控+γ − 雙門控</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">+0.07<span class="sub">[−1.94, +2.04]</span></td><td class="num">−0.12<span class="sub">[−1.17, +0.90]</span></td><td class="num">−0.02</td></tr>
+          <tr><td><span class="q">最完整的設定贏過基準嗎？</span><span class="formula">雙門控+γ − 純長視窗</span></td><td><span class="chip same">≈ 分不出來</span></td><td class="num">−1.00<span class="sub">[−4.84, +2.08]</span></td><td class="num">+0.21<span class="sub">[−0.83, +1.30]</span></td><td class="num">−0.40</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note prose">Δ = 實驗組 − 對照組，單位是百分點（pp），正值代表實驗組比較好。每個 seed 在同一批驗證視窗上相減，再平均 3 個 seed。95% CI 用兩層 bootstrap（重抽 clip，也重抽 seed，4000 次）。CI 不含 0 才算有顯著差異。下半身 = 6 類的 macro recall，上半身 = 2 類，mean1 = 兩者平均（訓練 log 挑 best checkpoint 用的就是它）。</p>
+    <nav class="toc" aria-label="目錄">
+      <a href="#settings">設定對照</a>
+      <a href="#evidence">兩種證據</a>
+      <a href="#overview">全部設定一覽</a>
+      <a href="#questions">逐題回答</a>
+      <a href="#curves">訓練趨勢</a>
+      <a href="#reliance">模型在用什麼</a>
+      <a href="#classes">逐類別</a>
+      <a href="#thesis">論文怎麼寫</a>
+      <a href="#files">VAL 檔案導覽</a>
+      <a href="#caveats">注意事項</a>
+      <a href="#appendix">附錄</a>
+    </nav>
+  </section>
+
+  <section id="settings">
+    <h2>設定對照</h2>
+    <p class="prose">所有設定共用同一個 SlowOnly-R50 backbone，只差在 neck 怎麼組合兩個視窗。長視窗特徵 F<sub>L</sub> 取自 layer3，涵蓋整段 21 幀；短視窗特徵 F<sub>S</sub> 取自 layer2 中段 15 幀，再用 small_proj 投影到 512 維。其他訓練設定（學習率 0.04、batch 64、16 個 epoch、cosine 退火、資料增強）在 34 個 run 裡完全相同。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>資料夾名稱</th><th>neck mode</th><th>融合方式</th></tr></thead>
+        <tbody>
+          <tr><td>純長視窗</td><td><code>long_only</code></td><td>只用 F<sub>L</sub></td></tr>
+          <tr><td>純短視窗</td><td><code>short_only</code></td><td>只用 F<sub>S</sub></td></tr>
+          <tr><td>無門控_雙視窗</td><td><code>dual_window</code></td><td>0.5·F<sub>L</sub> + 0.5·F<sub>S</sub>，固定等權</td></tr>
+          <tr><td>隨機學習</td><td><code>learnable</code></td><td>α·F<sub>L</sub> + (1−α)·F<sub>S</sub>，每個通道學一個固定的 α，不看輸入</td></tr>
+          <tr><td>單門控</td><td><code>per_gate</code></td><td>α 由全身運動特徵經 scorer 算出，每個樣本、每個通道都不同；上下半身兩個分類頭共用同一個融合結果</td></tr>
+          <tr><td>雙門控</td><td><code>dual_gate</code></td><td>上半身、下半身各一個 scorer，用各自部位的運動特徵，各自融合</td></tr>
+          <tr><td>_運動參數beta</td><td><code>motion_inject='beta'</code></td><td>運動特徵經線性層產生 b，F ← F + b（最後一層初始化為 0）</td></tr>
+          <tr><td>_運動參數gamma</td><td><code>motion_inject='gamma'</code></td><td>F ← F·(1 + g)；只有雙門控跑過</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note prose">運動特徵是 SG_filter 算出的速度、加速度、直線度統計，長視窗和短視窗各一份。</p>
+  </section>
+
+  <section id="evidence">
+    <h2>先分清楚兩種證據</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>重新訓練比較</h3>
+        <span class="ask">回答：加了它，模型有沒有比較好？</span>
+        <p>兩種設定各自從頭訓練，同一個 seed 相減。判斷一個設定有沒有用，要看這一種。本報告的判定全部來自這裡。</p>
+        <span class="src">來源：訓練 log、VAL/diag_*.json 與 .npz</span>
+      </div>
+      <div class="card">
+        <h3>反事實消融</h3>
+        <span class="ask">回答：這個模型有沒有在用它？</span>
+        <p>拿一個訓練好的模型，推論時把某個成分關掉或換成平均值。掉很多代表這個模型依賴它，不代表加了它會比較好。</p>
+        <span class="src">來源：VAL/abl_pergate_*.json、diag_dualgate_mgamma_*.json 的 ablation 欄位</span>
+      </div>
+    </div>
+    <figure>
+      <div class="plate"><img src="fig5_reliance.png" alt="兩組點圖。左：單門控正常時長刺 recall 72.0%，推論時拿掉短視窗掉到 15.4%，從頭訓練的純長視窗是 70.3%。右：雙門控+γ 下半身 macro recall 79.5%，推論時關掉注入 77.6%，從頭訓練不注入的雙門控 79.4%。"></div>
+      <figcaption>單門控推論時拿掉短視窗，長刺的 recall 從 72.0% 掉到 15.4%。可是從頭訓練的純長視窗，長刺 recall 是 70.3%。模型只是把辨認長刺的工作交給了短視窗；沒有短視窗時，長視窗自己也學得會。γ 注入也一樣：關掉會掉 1.9 pp，但從頭訓練、不注入的雙門控跟原本一樣好。</figcaption>
+    </figure>
+  </section>
+
+  <section id="overview">
+    <h2>全部設定一覽</h2>
+    <figure>
+      <div class="plate"><img src="fig1_overview.png" alt="點圖：12 個設定各 3 個 seed 的驗證 mean1，左欄用最佳 epoch，右欄用最後 3 個 epoch 平均。除了純短視窗兩個設定落在 80%～82%，其餘都擠在 84%～86% 之間，彼此重疊。"></div>
+      <figcaption>每個圓圈是一個 seed，黑色短線是平均，灰色直線是純長視窗的平均。左邊用 best checkpoint（目前的挑法），右邊用最後 3 個 epoch 的平均（不挑 epoch）。</figcaption>
+    </figure>
+    <ul class="prose">
+      <li>同一個設定換 seed，mean1 的標準差在 0.2 到 0.8 個百分點之間。</li>
+      <li>除了兩個純短視窗設定，其餘 10 個設定的平均都落在 84.9%～85.6%（最佳 epoch）或 84.2%～85.0%（最後 3 個 epoch）。</li>
+      <li>純長視窗在兩種算法下都排第一，但領先的幅度比 seed 的波動還小，所以也不能說它比其他設定好。</li>
+    </ul>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>設定</th><th class="num">seed</th><th class="num">mean1<br>最佳 epoch</th><th class="num">mean1<br>最後 3 epoch</th><th class="num">下半身<br>最佳 epoch</th><th class="num">上半身<br>最佳 epoch</th><th class="num">各 seed 的<br>最佳 epoch</th></tr></thead>
+        <tbody>
+          <tr class="base"><td>純長視窗</td><td class="num">3</td><td class="num">85.61 ± 0.67</td><td class="num">85.00 ± 0.63</td><td class="num">80.52 ± 1.00</td><td class="num">90.69 ± 0.51</td><td class="num">8 / 16 / 7</td></tr>
+          <tr><td>純短視窗</td><td class="num">3</td><td class="num">81.04 ± 0.64</td><td class="num">80.53 ± 0.54</td><td class="num">74.07 ± 0.51</td><td class="num">88.00 ± 0.93</td><td class="num">4 / 9 / 10</td></tr>
+          <tr><td>無門控雙視窗</td><td class="num">3</td><td class="num">85.16 ± 0.75</td><td class="num">84.57 ± 0.38</td><td class="num">79.48 ± 1.70</td><td class="num">90.85 ± 0.43</td><td class="num">8 / 6 / 11</td></tr>
+          <tr><td>隨機學習</td><td class="num">3</td><td class="num">85.27 ± 0.74</td><td class="num">84.70 ± 0.50</td><td class="num">79.40 ± 1.96</td><td class="num">91.14 ± 0.82</td><td class="num">13 / 7 / 6</td></tr>
+          <tr><td>單門控</td><td class="num">3</td><td class="num">85.51 ± 0.22</td><td class="num">84.74 ± 0.30</td><td class="num">79.66 ± 0.69</td><td class="num">91.35 ± 0.33</td><td class="num">4 / 7 / 6</td></tr>
+          <tr><td>雙門控</td><td class="num">3</td><td class="num">85.23 ± 0.73</td><td class="num">84.43 ± 0.69</td><td class="num">79.43 ± 1.76</td><td class="num">91.03 ± 0.45</td><td class="num">10 / 7 / 7</td></tr>
+          <tr class="group"><td colspan="7">加上運動參數</td></tr>
+          <tr><td>純長視窗+β</td><td class="num">3</td><td class="num">85.48 ± 0.46</td><td class="num">84.68 ± 0.08</td><td class="num">80.31 ± 1.13</td><td class="num">90.64 ± 0.23</td><td class="num">4 / 9 / 5</td></tr>
+          <tr><td>純短視窗+β</td><td class="num">1</td><td class="num">82.03</td><td class="num">81.86</td><td class="num">74.91</td><td class="num">89.16</td><td class="num">14</td></tr>
+          <tr><td>無門控雙視窗+β</td><td class="num">3</td><td class="num">84.92 ± 0.21</td><td class="num">84.39 ± 0.51</td><td class="num">78.74 ± 0.63</td><td class="num">91.10 ± 0.26</td><td class="num">10 / 6 / 5</td></tr>
+          <tr><td>單門控+β</td><td class="num">3</td><td class="num">85.16 ± 0.58</td><td class="num">84.22 ± 0.75</td><td class="num">79.10 ± 1.00</td><td class="num">91.23 ± 0.40</td><td class="num">4 / 3 / 5</td></tr>
+          <tr><td>雙門控+β</td><td class="num">3</td><td class="num">85.10 ± 0.22</td><td class="num">84.43 ± 0.57</td><td class="num">78.81 ± 0.20</td><td class="num">91.38 ± 0.43</td><td class="num">13 / 3 / 8</td></tr>
+          <tr><td>雙門控+γ</td><td class="num">3</td><td class="num">85.20 ± 0.74</td><td class="num">84.86 ± 0.54</td><td class="num">79.50 ± 2.05</td><td class="num">90.90 ± 0.61</td><td class="num">9 / 14 / 13</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note prose">數值是 3 個 seed 的平均 ± 標準差（%）。完整數字在 <code>VAL/report/settings.csv</code> 和 <code>runs.csv</code>。</p>
+  </section>
+
+  <section id="questions">
+    <h2>逐題回答：這個設定有沒有用</h2>
+    <figure>
+      <div class="plate"><img src="fig2_forest.png" alt="森林圖：8 個問題的配對差異與 95% 信賴區間，分下半身和上半身兩欄。只有「只用短視窗」一題的區間完全在 0 的左邊，其餘 7 題的區間都跨過 0。"></div>
+      <figcaption>大圓點是 3 個 seed 的平均差異，橫線是 95% 信賴區間，下方小圈是各 seed 的差異。藍色代表區間不含 0。</figcaption>
+    </figure>
+    <ul class="prose">
+      <li>只有第一題是藍色。只用短視窗時，下半身掉 6.4 pp、上半身掉 2.7 pp，兩邊的區間都不含 0。</li>
+      <li>β 那一題把 4 種架構合併成 12 組配對，是統計力最強的一題。平均 −0.5 pp，12 組裡有 7 組變差。</li>
+      <li>上半身有一個弱訊號：單門控比無門控雙視窗高 0.5 pp，3 個 seed 都是正的，但區間 [−0.49, +1.57] 還是含 0，需要更多 seed 才能確認。</li>
+      <li>改用「最後 3 個 epoch 平均」重算，每一題的方向和大小都差不多（<code>comparisons.csv</code> 的 <code>Δmean1_最後3ep</code> 欄）。</li>
+    </ul>
+  </section>
+
+  <section id="curves">
+    <h2>訓練趨勢</h2>
+    <div class="prose stack">
+      <p><strong>seed 怎麼取。</strong>每張圖的實線是 3 個 seed 的平均，陰影是 3 個 seed 的最高到最低。論文通常報多個 seed 的平均 ± 標準差，曲線也畫平均加陰影。只看 seed 42 在這裡會誤導：seed 42 的雙門控（85.9%）贏純長視窗（85.5%），換成 seed 44 卻輸 1.9 個百分點。每張圖只比 2～3 個設定，避免線太多。</p>
+      <p><strong>loss 是訓練 loss。</strong>mmaction2 驗證時只算準確率，log 裡沒有驗證 loss。</p>
+    </div>
+    <figure>
+      <div class="plate"><img src="fig3a_window.png" alt="純長視窗、無門控雙視窗、純短視窗的驗證準確率與訓練 loss 曲線。"></div>
+      <figcaption>純長視窗從第 1 個 epoch 就領先（82.6%，雙視窗 79.9%），雙視窗到第 6 個 epoch 左右才接近，之後沒有超過。純短視窗整段低 4～5 個百分點。訓練 loss 也是純長視窗最低：第 16 個 epoch 是 0.027，雙視窗 0.052，純短視窗 0.141。</figcaption>
+    </figure>
+    <figure>
+      <div class="plate"><img src="fig3b_fusion.png" alt="無門控雙視窗、隨機學習、單門控的驗證準確率與訓練 loss 曲線，第 5 個 epoch 之後幾乎重疊。"></div>
+      <figcaption>三條線在第 5 個 epoch 之後幾乎重疊。融合權重固定 0.5、每個通道學一個固定值、或由運動特徵逐樣本決定，結果都一樣。</figcaption>
+    </figure>
+    <figure>
+      <div class="plate"><img src="fig3c_gate.png" alt="單門控與雙門控的驗證準確率與訓練 loss 曲線，兩條線重疊。"></div>
+      <figcaption>兩條線重疊。上下半身各用一個門控沒有帶來差異。</figcaption>
+    </figure>
+    <figure>
+      <div class="plate"><img src="fig3d_motion.png" alt="五個架構各自比較不注入與注入 β（雙門控另加 γ）的驗證準確率與訓練 loss，每一欄的線都幾乎重合。"></div>
+      <figcaption>每一欄是一種架構。灰線（不注入）和藍、橘線（注入 β、γ）幾乎重合，訓練 loss 也一樣。</figcaption>
+    </figure>
+    <p class="note prose">曲線上的尖谷是單一 seed 在某個 epoch 的驗證準確率突然掉下去，下一個 epoch 就回來。例如純長視窗 seed 44 在第 9 個 epoch 掉到 72.3%，單門控+β seed 43 在第 5 個 epoch 掉到 64.2%。這種波動讓「挑最佳 epoch」很吃運氣。</p>
+  </section>
+
+  <section id="reliance">
+    <h2>模型實際在用什麼</h2>
+    <figure>
+      <div class="plate"><img src="fig4_counterfactual.png" alt="反事實消融點圖。單門控：拿掉短視窗特徵掉 11.6 pp，其餘項目都接近 0。雙門控+γ：拿掉短視窗掉 9.6，運動特徵全換平均掉 2.3，關掉注入掉 1.9，只換掉短視窗運動特徵掉 1.4，換掉直線度掉 1.1，門控固定只掉 0.2 左右。"></div>
+      <figcaption>同一個訓練好的模型，推論時把某個成分關掉，下半身 macro recall 掉了多少。藍色 = 3 個 seed 都掉、平均掉 1 pp 以上。</figcaption>
+    </figure>
+    <ul class="prose">
+      <li><strong>單門控：</strong>拿掉短視窗掉 11.6 pp，其中長刺的 recall 掉 56.5 pp。門控固定成 0.5／0.5 只掉 0.30 pp，固定成平均 α 掉 0.26 pp，運動特徵全換成平均值掉 0.22 pp。門控的輸出幾乎沒有被用到。</li>
+      <li><strong>雙門控+γ：</strong>拿掉短視窗掉 9.6 pp；關掉 γ 注入掉 1.9 pp，3 個 seed 都掉，主要是「無」類別的 recall 掉 8.9 pp；運動特徵全換成平均值掉 2.3 pp；門控固定只掉 0.26 pp。這個模型是透過注入在用運動特徵，門控沒有在用。</li>
+      <li>回到逐題回答的結果：重新訓練時，γ 注入和門控都沒有讓準確率變高。模型會用它，少了它也不會比較差。</li>
+      <li>tt2.py 存的 <code>gate.chan_std</code> 與 <code>gate.sample_std</code> 是先平均再算的標準差，會嚴重低估 α 的變化（單門控 seed 42 實測，α 的變異有 82% 在「通道 × 樣本」的交互項）。要判斷門控有沒有用，看 <code>gate_half</code>、<code>gate_mean</code> 這兩個消融。</li>
+    </ul>
+  </section>
+
+  <section id="classes">
+    <h2>逐類別：改變的是哪些類別答對</h2>
+    <div class="prose stack">
+      <p>macro 沒變，不代表每個類別都沒變。雙視窗家族會把一部分「前進」判成「無」，最明顯的是單門控：相對純長視窗，「無」的 recall 在 3 個 seed 分別 +12.7、+7.4、+4.8 pp，「前進」分別 −8.6、−9.3、−12.0 pp。3 個 seed 合計，「前進→無」的誤判從 165 次增加到 282 次。兩邊互相抵消，所以 macro 不變。這是類別之間的取捨，不是增益。</p>
+      <p>長刺只有 82 個視窗（32 個 clip），同一組比較在不同 seed 之間可以差很多。例如無門控雙視窗對純長視窗，長刺 recall 在 3 個 seed 分別是 +9.8、+9.8、−17.1 pp。只看平均很容易誤判。</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>設定</th>
+          <th class="num">無<span class="sub">377／99</span></th>
+          <th class="num">前進<span class="sub">475／111</span></th>
+          <th class="num">後退<span class="sub">727／172</span></th>
+          <th class="num">長刺<span class="sub">82／32</span></th>
+          <th class="num">飛刺<span class="sub">116／32</span></th>
+          <th class="num">前進長刺<span class="sub">285／70</span></th></tr></thead>
+        <tbody>
+          <tr class="base"><td>純長視窗</td><td class="num">58.4</td><td class="num">81.0</td><td class="num">89.4</td><td class="num">70.3</td><td class="num">98.3</td><td class="num">85.7</td></tr>
+          <tr><td>純短視窗</td><td class="num">57.2<span class="sub">−1.1</span></td><td class="num">71.9<span class="sub">−9.0</span></td><td class="num">85.5<span class="sub">−3.9</span></td><td class="num">52.8<span class="sub">−17.5</span></td><td class="num">91.4<span class="sub">−6.9</span></td><td class="num">85.6<span class="sub">−0.1</span></td></tr>
+          <tr><td>無門控雙視窗</td><td class="num">62.8<span class="sub">+4.4</span></td><td class="num">76.7<span class="sub">−4.3</span></td><td class="num">87.5<span class="sub">−1.9</span></td><td class="num">71.1<span class="sub">+0.8</span></td><td class="num">97.7<span class="sub">−0.6</span></td><td class="num">81.0<span class="sub">−4.7</span></td></tr>
+          <tr><td>隨機學習</td><td class="num">62.5<span class="sub">+4.1</span></td><td class="num">75.4<span class="sub">−5.6</span></td><td class="num">89.2<span class="sub">−0.1</span></td><td class="num">66.3<span class="sub">−4.1</span></td><td class="num">98.6<span class="sub">+0.3</span></td><td class="num">84.4<span class="sub">−1.3</span></td></tr>
+          <tr><td>單門控</td><td class="num">66.7<span class="sub">+8.3</span></td><td class="num">71.0<span class="sub">−10.0</span></td><td class="num">86.5<span class="sub">−2.9</span></td><td class="num">72.0<span class="sub">+1.6</span></td><td class="num">98.9<span class="sub">+0.6</span></td><td class="num">82.9<span class="sub">−2.8</span></td></tr>
+          <tr><td>雙門控</td><td class="num">65.0<span class="sub">+6.6</span></td><td class="num">77.3<span class="sub">−3.7</span></td><td class="num">86.1<span class="sub">−3.2</span></td><td class="num">65.0<span class="sub">−5.3</span></td><td class="num">97.7<span class="sub">−0.6</span></td><td class="num">85.5<span class="sub">−0.2</span></td></tr>
+          <tr class="group"><td colspan="7">加上運動參數</td></tr>
+          <tr><td>純長視窗+β</td><td class="num">59.9<span class="sub">+1.5</span></td><td class="num">79.8<span class="sub">−1.2</span></td><td class="num">85.1<span class="sub">−4.3</span></td><td class="num">75.2<span class="sub">+4.9</span></td><td class="num">97.7<span class="sub">−0.6</span></td><td class="num">84.2<span class="sub">−1.5</span></td></tr>
+          <tr><td>純短視窗+β（seed 44）</td><td class="num">65.5<span class="sub">+7.2</span></td><td class="num">77.7<span class="sub">−3.3</span></td><td class="num">79.9<span class="sub">−9.4</span></td><td class="num">48.8<span class="sub">−21.5</span></td><td class="num">90.5<span class="sub">−7.8</span></td><td class="num">87.0<span class="sub">+1.3</span></td></tr>
+          <tr><td>無門控雙視窗+β</td><td class="num">58.4<span class="sub">+0.1</span></td><td class="num">75.3<span class="sub">−5.7</span></td><td class="num">88.5<span class="sub">−0.9</span></td><td class="num">69.9<span class="sub">−0.4</span></td><td class="num">98.3<span class="sub">+0.0</span></td><td class="num">82.0<span class="sub">−3.7</span></td></tr>
+          <tr><td>單門控+β</td><td class="num">66.0<span class="sub">+7.6</span></td><td class="num">79.0<span class="sub">−2.0</span></td><td class="num">83.6<span class="sub">−5.8</span></td><td class="num">72.8<span class="sub">+2.4</span></td><td class="num">99.1<span class="sub">+0.9</span></td><td class="num">74.2<span class="sub">−11.6</span></td></tr>
+          <tr><td>雙門控+β</td><td class="num">61.4<span class="sub">+3.0</span></td><td class="num">79.3<span class="sub">−1.7</span></td><td class="num">83.5<span class="sub">−5.9</span></td><td class="num">64.2<span class="sub">−6.1</span></td><td class="num">98.3<span class="sub">+0.0</span></td><td class="num">86.2<span class="sub">+0.5</span></td></tr>
+          <tr><td>雙門控+γ</td><td class="num">66.2<span class="sub">+7.9</span></td><td class="num">78.3<span class="sub">−2.7</span></td><td class="num">86.8<span class="sub">−2.5</span></td><td class="num">59.8<span class="sub">−10.6</span></td><td class="num">97.7<span class="sub">−0.6</span></td><td class="num">88.2<span class="sub">+2.5</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note prose">下半身逐類別 recall（%），best checkpoint，3 個 seed 平均；灰色小字是和純長視窗的差（pp）。表頭的數字是視窗數／clip 數。純短視窗+β 只有 seed 44。</p>
+  </section>
+
+  <section id="thesis">
+    <h2>論文可以怎麼寫</h2>
+    <div class="two">
+      <div class="yes">
+        <h3>有數據支持</h3>
+        <ul>
+          <li>長視窗（layer3、21 幀）是辨識的主力。只用短視窗時 mean1 下降 4.6 pp（下半身 −6.4 pp），3 個 seed 一致，95% CI 不含 0。</li>
+          <li>在這份資料與訓練設定下，短視窗融合、可學習權重、單／雙門控、運動參數 β／γ 都沒有帶來可測量的增益（配對 95% CI 都含 0）。</li>
+          <li>訓練好的模型會依賴短視窗和 γ 注入，但不含這些成分的模型重新訓練後能達到同樣的準確率。這些資訊和長視窗特徵可以互相替代。</li>
+        </ul>
+      </div>
+      <div class="no">
+        <h3>目前數據不支持</h3>
+        <ul>
+          <li>「門控提升了準確率」、「雙視窗融合有效」、「運動參數注入有效」。</li>
+          <li>把反事實消融的掉分當成模組的貢獻，例如「短視窗貢獻 11.6 pp」。</li>
+          <li>只用單一 seed 的差距下結論。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="prose stack">
+      <h3>如果還想證明某個設定有用</h3>
+      <ul>
+        <li>用獨立的測試集報告，或固定報最後一個 epoch。現在的 best checkpoint 是在同一個驗證集上挑的。</li>
+        <li>互補的模組只會在長視窗單獨做不好的地方顯出價值。可以先找出純長視窗錯最多的片段（例如「前進」和「無」互相混淆的那些），檢查短視窗或運動參數在這些片段上有沒有幫助。</li>
+        <li>多跑 seed 能縮小信賴區間，但以目前的波動，要可靠地分出 0.5 pp 的差距，需要的 seed 數遠多於 3。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="files">
+    <h2>VAL 檔案導覽</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>檔案</th><th>是什麼</th></tr></thead>
+        <tbody>
+          <tr><td><code>tt2.py</code></td><td>診斷與消融的主程式。載入一個 checkpoint 跑驗證集，輸出逐類別 recall／precision、混淆矩陣、clip 級結果、bootstrap CI；不加 <code>--no-ablation</code> 時會做反事實消融（拿掉 F<sub>S</sub>、關注入、運動特徵換平均、門控固定等）。<code>--compare</code> 模式可以彙整多份結果。</td></tr>
+          <tr><td><code>run_all.py</code></td><td>掃 <code>work_dirs</code>，對每個 run 的 <code>best_dual_acc_mean1_epoch_*.pth</code> 呼叫 tt2.py（mode 從資料夾名稱判斷），最後自動跑 <code>--compare</code>。</td></tr>
+          <tr><td><code>tt.py</code></td><td>舊版診斷程式，對應舊的 neck（<code>use_fs</code>／<code>use_sg</code> 那一代），現在的 checkpoint 不能用。</td></tr>
+          <tr><td><code>c.py</code></td><td>SG_filter 的小測試：檢查 motion_L／S、upper／lower 特徵的形狀和數值是否有限。</td></tr>
+          <tr><td><code>diag_&lt;設定&gt;_m&lt;注入&gt;_seed&lt;n&gt;.json</code></td><td>一個 best checkpoint 的完整診斷。重點欄位：<code>overall</code>（mean1 等）、<code>lower</code>／<code>upper</code>（逐類別 recall、precision、樣本數）、<code>confusion_lower</code>、<code>lower_clip</code>、<code>ci</code>、<code>gate</code>、<code>ablation</code>（只有跑過消融的才有：雙門控+γ）。</td></tr>
+          <tr><td><code>diag_*.npz</code></td><td>逐視窗的預測機率、真實標籤、clip id。配對比較（同一批視窗相減）和 bootstrap 都靠它。</td></tr>
+          <tr><td><code>abl_pergate_seed*.json／.npz</code></td><td>單門控（不注入）的完整反事實消融，9 月 19 日跑的。</td></tr>
+          <tr><td><code>make_report.py</code></td><td>這次新增。只讀訓練 log 和上面的檔案，產生這份報告的所有圖和 CSV，不載入模型。</td></tr>
+          <tr><td><code>report/</code></td><td>輸出：<code>fig*.png</code>、<code>all_settings_*.png</code>、<code>per_setting/</code>（每個設定一張 accuracy + loss 圖，檔名就是資料夾名稱）、<code>runs.csv</code>、<code>settings.csv</code>、<code>comparisons.csv</code>、<code>ablations.csv</code>。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose stack">
+      <h3>重新產生</h3>
+      <pre><code>conda activate posec3d
+cd E:\rcnn\mmaction2
+python VAL\make_report.py</code></pre>
+      <p>新增實驗之後，先用 run_all.py 或 tt2.py 產生 <code>diag_*.json</code> 與 <code>.npz</code>，放進 <code>VAL\</code>，再重跑 make_report.py。新的設定名稱要先加進 make_report.py 最上面的 <code>SETTINGS</code>。這份頁面的文字是今天的快照，圖和 CSV 會跟著重跑更新。</p>
+      <h3>這次做了什麼</h3>
+      <ul>
+        <li>沒有修改任何模型或訓練程式碼。新增了 <code>VAL/make_report.py</code> 和 <code>VAL/report/</code>。</li>
+        <li><code>無門控_雙視窗_seed=43</code> 被放在 seed=42 的資料夾裡面（<code>work_dirs/20260904_無門控_雙視窗_seed=42/20260904_無門控_雙視窗_seed=43/</code>），run_all.py 掃不到，所以 VAL 原本少這一份。我用 tt2.py 補跑了這一份（<code>--no-ablation</code>），產生 <code>VAL/diag_dualwindow_mnone_seed43.json</code> 和 <code>.npz</code>，sanity check 的 mean1 = 0.8575，和訓練 log 第 6 個 epoch 一致。資料夾我沒有搬動。</li>
+        <li>34 份 diag 的 best mean1 都和訓練 log 一致，VAL 的數字可以直接使用。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="caveats">
+    <h2>注意事項</h2>
+    <ol class="prose">
+      <li><strong>挑 checkpoint 和報告用的是同一個驗證集。</strong>config 的 val 和 test 都指向 <code>xsub_val</code>。best epoch 是從 16 個 epoch 裡挑最高的，數字會偏樂觀，也比較吵。所以這份報告同時列了「最後 3 個 epoch 平均」，兩種算法的結論相同。</li>
+      <li><strong>只有 3 個 seed。</strong>同一設定的 mean1 標準差在 0.2～0.8 pp，比大部分設定之間的差距還大。</li>
+      <li><strong>驗證視窗不是獨立樣本。</strong>516 個 clip 切成 2062 個重疊視窗，所以信賴區間以 clip 為單位重抽，否則會太窄。tt2.py <code>--compare</code> 印的 McNemar p 值把視窗當成獨立樣本，會偏樂觀。</li>
+      <li><strong>小類別很敏感。</strong>長刺、飛刺各只有 32 個 clip。長刺翻錯 1 個視窗，下半身 macro 就會動 0.2 pp。</li>
+      <li><strong>clip 級結論一樣。</strong>同一 clip 的視窗機率平均後，下半身 macro：純長視窗 81.1%、單門控 81.1%、雙門控 81.4%、無門控雙視窗 80.7%、雙門控+γ 80.5%、純短視窗 77.8%。</li>
+      <li><strong>兩批訓練的 config 只差在 neck。</strong>不注入的 run（9 月 4 日）和 β／γ 的 run（9 月 6 日）用了不同版本的 neck 參數寫法，但資料增強和訓練設定逐行相同，而且現在的程式碼能完全重現每一份 checkpoint 的驗證分數。</li>
+    </ol>
+  </section>
+
+  <section id="appendix">
+    <h2>附錄：每個設定的曲線</h2>
+    <p class="prose">每個小圖是一個設定，藍線是該設定 3 個 seed 的平均（陰影是最高到最低），灰線是純長視窗的平均，方便對照。單一設定的大圖（含上下半身分開的準確率）在 <code>VAL/report/per_setting/</code>。</p>
+    <figure>
+      <div class="plate"><img src="all_settings_acc.png" alt="12 個小圖，每個設定的驗證 mean1 曲線，與純長視窗平均對照。"></div>
+      <figcaption>驗證準確率 mean1。</figcaption>
+    </figure>
+    <figure>
+      <div class="plate"><img src="all_settings_loss.png" alt="12 個小圖，每個設定的訓練 loss 曲線，與純長視窗平均對照。"></div>
+      <figcaption>訓練 loss（每個 epoch 平均）。純長視窗的 loss 降得最低，純短視窗最高。</figcaption>
+    </figure>
+  </section>
+</main>
+
+</html>
